@@ -426,6 +426,84 @@ class LGFX : public lgfx::LGFX_Device
 
 static LGFX *tft = nullptr;
 
+#elif defined(FREEWILI)
+#include <LovyanGFX.hpp>
+
+class LGFX : public lgfx::LGFX_Device
+{
+    lgfx::Bus_SPI _bus_instance;
+    lgfx::Panel_ST7789 _panel_instance;
+    lgfx::Light_PWM _light_instance;
+    lgfx::Touch_FT5x06 _touch_instance;
+
+  public:
+    LGFX(void)
+    {
+        // SPI Bus
+        {
+            auto cfg = _bus_instance.config();
+            cfg.spi_host = 0;
+            cfg.spi_mode = 0;
+            cfg.freq_write = SPI_FREQUENCY;
+            cfg.freq_read = 16000000;
+            cfg.pin_sclk = ST7789_SCK;
+            cfg.pin_mosi = ST7789_SDA;
+            cfg.pin_miso = -1;
+            cfg.pin_dc = ST7789_RS;
+            _bus_instance.config(cfg);
+        }
+        _panel_instance.setBus(&_bus_instance);
+
+        // Panel
+        {
+            auto cfg = _panel_instance.config();
+            cfg.pin_cs = ST7789_CS;
+            cfg.pin_rst = -1;
+            cfg.pin_busy = -1;
+            cfg.panel_width = TFT_WIDTH;
+            cfg.panel_height = TFT_HEIGHT;
+            cfg.offset_rotation = 0;
+            cfg.readable = false;
+            cfg.invert = true;
+            cfg.rgb_order = false;
+            cfg.dlen_16bit = false;
+            cfg.bus_shared = false;
+            _panel_instance.config(cfg);
+        }
+
+        // Backlight
+        {
+            auto cfg = _light_instance.config();
+            cfg.pin_bl = ST7789_BL;
+            cfg.invert = false;
+            cfg.freq = 44100;
+            cfg.pwm_channel = 0;
+            _light_instance.config(cfg);
+            _panel_instance.setLight(&_light_instance);
+        }
+
+        // Touch (FT6336U / FT5x06)
+        {
+            auto cfg = _touch_instance.config();
+            cfg.pin_int = -1;
+            cfg.pin_rst = -1;
+            cfg.i2c_port = TOUCH_I2C_PORT;
+            cfg.i2c_addr = TOUCH_ADDRESS;
+            cfg.freq = 400000;
+            cfg.x_min = 0;
+            cfg.x_max = TFT_WIDTH - 1;
+            cfg.y_min = 0;
+            cfg.y_max = TFT_HEIGHT - 1;
+            _touch_instance.config(cfg);
+            _panel_instance.setTouch(&_touch_instance);
+        }
+
+        setPanel(&_panel_instance);
+    }
+};
+
+static LGFX *tft = nullptr;
+
 #elif defined(ST7789_CS)
 #include <LovyanGFX.hpp> // Graphics and font library for ST7735 driver chip
 #ifdef HELTEC_V4_TFT

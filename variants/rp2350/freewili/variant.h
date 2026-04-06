@@ -1,6 +1,8 @@
 #pragma once
 
+#ifndef PRIVATE_HW
 #define PRIVATE_HW  // Community/DIY hardware designation
+#endif
 
 // --- Display (ST7789 TFT 480x320 via SPI0) ---
 #define ST7789_CS 9
@@ -40,6 +42,21 @@
 #undef USE_SX1280
 #undef RF95_IRQ
 
+// Dummy SPI LoRa pins to satisfy main.cpp SPI init block
+// (they won't be used since we use UART radio, but the code compiles unconditionally)
+#ifndef LORA_SCK
+#define LORA_SCK -1
+#endif
+#ifndef LORA_MOSI
+#define LORA_MOSI -1
+#endif
+#ifndef LORA_MISO
+#define LORA_MISO -1
+#endif
+#ifndef LORA_CS
+#define LORA_CS -1
+#endif
+
 // --- Buttons (PIC16 UART) ---
 #define HAS_PIC_BUTTON_INPUT 1
 #define PIC_UART_RX_PIN 38
@@ -58,6 +75,7 @@
 // --- Power ---
 // Battery monitored via I2C fuel gauge, not ADC
 #define BATTERY_PIN -1
+#define BATTERY_SENSE_RESOLUTION_BITS 10
 
 // --- LED ---
 #define LED_PIN 21            // LED_SERIAL on display CPU

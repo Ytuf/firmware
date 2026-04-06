@@ -33,6 +33,10 @@
 #include "STM32WLE5JCInterface.h"
 #endif
 
+#if defined(USE_UART_RADIO)
+#include "UARTRadioInterface.h"
+#endif
+
 static const meshtastic_Config_LoRaConfig_ModemPreset PRESETS_STD[] = {
     meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,     meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW,
     meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW,   meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
@@ -250,6 +254,17 @@ extern SPIClass SPI1;
 std::unique_ptr<RadioInterface> initLoRa()
 {
     std::unique_ptr<RadioInterface> rIf = nullptr;
+
+#if defined(USE_UART_RADIO)
+    rIf = std::unique_ptr<RadioInterface>(new UARTRadioInterface());
+    if (!rIf->init()) {
+        LOG_WARN("No UART radio bridge");
+        rIf = nullptr;
+    } else {
+        LOG_INFO("UARTRadioInterface init success");
+    }
+    return rIf;
+#endif
 
 #if ARCH_PORTDUINO
     SPISettings loraSpiSettings(portduino_config.spiSpeed, MSBFIRST, SPI_MODE0);

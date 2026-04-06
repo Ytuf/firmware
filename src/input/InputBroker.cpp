@@ -29,6 +29,10 @@
 #include "input/kbMatrixImpl.h"
 #endif
 
+#if defined(HAS_PIC_BUTTON_INPUT)
+#include "PICButtonInput.h"
+#endif
+
 #if HAS_BUTTON || defined(ARCH_PORTDUINO)
 #include "input/ButtonThread.h"
 
@@ -397,5 +401,11 @@ void InputBroker::Init()
 #endif
 #ifdef INPUTBROKER_EXPRESSLRSFIVEWAY_TYPE
     expressLRSFiveWayInput = new ExpressLRSFiveWay();
+#endif
+
+#if defined(HAS_PIC_BUTTON_INPUT)
+    picButtonInput = new PICButtonInput();
+    picButtonInput->init();
+    registerSource(picButtonInput);
 #endif
 }

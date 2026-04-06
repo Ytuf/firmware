@@ -78,5 +78,10 @@
 #define BATTERY_PIN -1
 #define BATTERY_SENSE_RESOLUTION_BITS 10
 
+// --- Audio Notifications ---
+#define EXT_NOTIFY_OUT 20        // Use a spare GPIO for notification buzzer/LED
+#define HAS_BUZZER 1             // Enable buzzer support
+#define BUZZER_PIN EXT_NOTIFY_OUT
+
 // --- LED ---
 #define LED_PIN 21            // LED_SERIAL on display CPU

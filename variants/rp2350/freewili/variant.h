@@ -24,18 +24,22 @@
 // --- Touch (FT6336U via I2C) ---
 #define TOUCH_SCREEN
 #define HAS_TOUCHSCREEN 1
-#define TOUCH_I2C_PORT 0
+#define TOUCH_I2C_PORT 0     // Wire (overridden to i2c1 via __WIRE0_DEVICE)
 #define TOUCH_ADDRESS 0x38   // FT6336U / FT5x06 family
 
 // --- I2C Bus ---
+// GPIO 26/27 are i2c1 pins. Wire is overridden to i2c1 via
+// -D__WIRE0_DEVICE=i2c1 in platformio.ini build_flags.
 #define I2C_SDA 26
 #define I2C_SCL 27
 
-// --- Radio (UART to WIO-E5, NOT SPI) ---
+// --- Radio (UART to WIO-E5 — split across two hardware UARTs) ---
+// GPIO 32 = UART0_TX (Serial1), GPIO 23 = UART1_RX (Serial2)
 #define USE_UART_RADIO 1
-#define UART_RADIO_TX_PIN 32   // RP2350 TX -> WIO-E5 PB7 (UART1_RX)
-#define UART_RADIO_RX_PIN 23   // RP2350 RX <- WIO-E5 PB6 (UART1_TX)
+#define UART_RADIO_TX_PIN 32
+#define UART_RADIO_RX_PIN 23
 #define UART_RADIO_BAUD 115200
+#define USE_SPLIT_UART_RADIO 1 // TX via Serial1 (UART0), RX via Serial2 (UART1)
 
 // Disable standard SPI radio defines
 #undef USE_SX1262
@@ -45,24 +49,29 @@
 
 // Dummy SPI LoRa pins to satisfy main.cpp SPI init block
 // (they won't be used since we use UART radio, but the code compiles unconditionally)
+// SPI1 is used ONLY for the display, not LoRa (we use UART radio).
+// Do NOT define HW_SPI1_DEVICE — we don't want Meshtastic's SPI init
+// to touch SPI1 at all. Our display driver manages SPI1 directly via Pico SDK.
+// Dummy LORA pins to satisfy code that references them:
 #ifndef LORA_SCK
-#define LORA_SCK -1
+#define LORA_SCK 2      // SPI0 pin (unused, keeps Meshtastic SPI init on SPI0)
 #endif
 #ifndef LORA_MOSI
-#define LORA_MOSI -1
+#define LORA_MOSI 3     // SPI0 pin (unused)
 #endif
 #ifndef LORA_MISO
-#define LORA_MISO -1
+#define LORA_MISO 4     // SPI0 pin (unused)
 #endif
 #ifndef LORA_CS
-#define LORA_CS -1
+#define LORA_CS 5       // SPI0 pin (unused)
 #endif
 
-// --- Buttons (PIC16 UART) ---
-#define HAS_PIC_BUTTON_INPUT 1
-#define PIC_UART_RX_PIN 38
-#define PIC_UART_TX_PIN 39
-#define PIC_UART_BAUD 9600   // PIC16 default baud
+// --- Buttons (PIC16 UART via SerialPIO) ---
+// Temporarily disabled to isolate PIO allocation conflict
+// #define HAS_PIC_BUTTON_INPUT 1
+// #define PIC_UART_TX_PIN 38
+// #define PIC_UART_RX_PIN 39
+#define PIC_UART_BAUD 9600
 
 // No direct GPIO button
 #define BUTTON_PIN -1

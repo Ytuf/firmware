@@ -427,79 +427,101 @@ class LGFX : public lgfx::LGFX_Device
 static LGFX *tft = nullptr;
 
 #elif defined(FREEWILI)
-#include <LovyanGFX.hpp>
+// Pico SDK-based ST7789 driver — bypasses LovyanGFX which breaks SPI on RP2350
+#include "hardware/spi.h"
+#include "hardware/gpio.h"
+#include "hardware/pwm.h"
 
-class LGFX : public lgfx::LGFX_Device
-{
-    lgfx::Bus_SPI _bus_instance;
-    lgfx::Panel_ST7789 _panel_instance;
-    lgfx::Light_PWM _light_instance;
-    lgfx::Touch_FT5x06 _touch_instance;
+#define TFT_BLACK 0x0000
+#define TFT_WHITE 0xFFFF
+#define TFT_RED   0xF800
+#define TFT_GREEN 0x07E0
+#define TFT_BLUE  0x001F
 
-  public:
-    LGFX(void)
-    {
-        // SPI Bus
-        {
-            auto cfg = _bus_instance.config();
-            cfg.spi_host = 0;
-            cfg.spi_mode = 0;
-            cfg.freq_write = SPI_FREQUENCY;
-            cfg.freq_read = 16000000;
-            cfg.pin_sclk = ST7789_SCK;
-            cfg.pin_mosi = ST7789_SDA;
-            cfg.pin_miso = -1;
-            cfg.pin_dc = ST7789_RS;
-            _bus_instance.config(cfg);
-        }
-        _panel_instance.setBus(&_bus_instance);
+class LGFX {
+    bool _inited = false;
 
-        // Panel
-        {
-            auto cfg = _panel_instance.config();
-            cfg.pin_cs = ST7789_CS;
-            cfg.pin_rst = -1;
-            cfg.pin_busy = -1;
-            cfg.panel_width = TFT_WIDTH;
-            cfg.panel_height = TFT_HEIGHT;
-            cfg.offset_rotation = 0;
-            cfg.readable = false;
-            cfg.invert = true;
-            cfg.rgb_order = false;
-            cfg.dlen_16bit = false;
-            cfg.bus_shared = false;
-            _panel_instance.config(cfg);
-        }
-
-        // Backlight
-        {
-            auto cfg = _light_instance.config();
-            cfg.pin_bl = ST7789_BL;
-            cfg.invert = false;
-            cfg.freq = 44100;
-            cfg.pwm_channel = 0;
-            _light_instance.config(cfg);
-            _panel_instance.setLight(&_light_instance);
-        }
-
-        // Touch (FT6336U / FT5x06)
-        {
-            auto cfg = _touch_instance.config();
-            cfg.pin_int = -1;
-            cfg.pin_rst = -1;
-            cfg.i2c_port = TOUCH_I2C_PORT;
-            cfg.i2c_addr = TOUCH_ADDRESS;
-            cfg.freq = 400000;
-            cfg.x_min = 0;
-            cfg.x_max = TFT_WIDTH - 1;
-            cfg.y_min = 0;
-            cfg.y_max = TFT_HEIGHT - 1;
-            _touch_instance.config(cfg);
-            _panel_instance.setTouch(&_touch_instance);
-        }
-
-        setPanel(&_panel_instance);
+    void spiCmd(uint8_t c) {
+        gpio_put(ST7789_RS, 0); gpio_put(ST7789_CS, 0);
+        spi_write_blocking(spi1, &c, 1);
+        gpio_put(ST7789_CS, 1);
     }
+    void spiDat(const uint8_t *d, size_t len) {
+        gpio_put(ST7789_RS, 1); gpio_put(ST7789_CS, 0);
+        spi_write_blocking(spi1, d, len);
+        gpio_put(ST7789_CS, 1);
+    }
+    void spiDat8(uint8_t d) { spiDat(&d, 1); }
+
+public:
+    void *_panel_instance = nullptr; // stub for hasTouch check
+
+    void init() {
+        if (_inited) return;
+        _inited = true;
+
+        // Full SPI1 init from scratch using Pico SDK
+        // (Arduino SPI.begin() on SPI0 may have corrupted SPI1 state)
+        spi_init(spi1, 40000000);
+        spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+        gpio_set_function(ST7789_SCK, GPIO_FUNC_SPI);  // GPIO 10
+        gpio_set_function(ST7789_SDA, GPIO_FUNC_SPI);  // GPIO 11
+        gpio_init(ST7789_CS); gpio_set_dir(ST7789_CS, GPIO_OUT); gpio_put(ST7789_CS, 1);
+        gpio_init(ST7789_RS); gpio_set_dir(ST7789_RS, GPIO_OUT); gpio_put(ST7789_RS, 1);
+        gpio_init(ST7789_BL); gpio_set_dir(ST7789_BL, GPIO_OUT); gpio_put(ST7789_BL, 1);
+
+        // ST7789 init sequence
+        spiCmd(0x01); sleep_ms(150);   // SW reset
+        spiCmd(0x11); sleep_ms(500);   // Sleep out
+        spiCmd(0x3A); spiDat8(0x05);   // 16-bit color
+        spiCmd(0x21);                  // INVON
+        spiCmd(0x36); spiDat8(0x2C);   // MADCTL = SWAP_XY | RGB | HORIZ_ORDER
+        spiCmd(0x29); sleep_ms(100);   // Display ON
+    }
+
+    void fillScreen(uint16_t color) {
+        spiCmd(0x2A); spiDat8(0); spiDat8(0); spiDat8(0x01); spiDat8(0xDF);
+        spiCmd(0x2B); spiDat8(0); spiDat8(0); spiDat8(0x01); spiDat8(0xDF);
+        spiCmd(0x2C);
+        uint8_t hi = color >> 8, lo = color & 0xFF;
+        uint8_t px[] = {hi, lo};
+        gpio_put(ST7789_RS, 1); gpio_put(ST7789_CS, 0);
+        for (uint32_t i = 0; i < 480UL * 480; i++)
+            spi_write_blocking(spi1, px, 2);
+        gpio_put(ST7789_CS, 1);
+    }
+
+    void clear() { fillScreen(0x0000); }
+
+    void pushRect(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t *data) {
+        uint16_t x1 = x, x2 = x + w - 1, y1 = y, y2 = y + h - 1;
+        spiCmd(0x2A); spiDat8(x1>>8); spiDat8(x1); spiDat8(x2>>8); spiDat8(x2);
+        spiCmd(0x2B); spiDat8(y1>>8); spiDat8(y1); spiDat8(y2>>8); spiDat8(y2);
+        spiCmd(0x2C);
+        // data is in big-endian RGB565 already from Meshtastic
+        gpio_put(ST7789_RS, 1); gpio_put(ST7789_CS, 0);
+        spi_write_blocking(spi1, (const uint8_t *)data, w * h * 2);
+        gpio_put(ST7789_CS, 1);
+    }
+
+    void draw16bitBeRGBBitmap(int32_t x, int32_t y, uint16_t *data, int32_t w, int32_t h = 1) {
+        pushRect(x, y, w, h, data);
+    }
+
+    void setBrightness(uint8_t b) {
+        pwm_set_gpio_level(ST7789_BL, b * b); // quadratic for perceived linearity
+    }
+
+    void setRotation(uint8_t r) { /* rotation handled by MADCTL in init() */ }
+    void setSwapBytes(bool s) { }
+    void displayOn() { spiCmd(0x29); }
+    void displayOff() { spiCmd(0x28); }
+    void wakeup() { spiCmd(0x11); sleep_ms(120); }
+    void sleep() { spiCmd(0x10); sleep_ms(5); }
+    void powerSaveOn() { }
+    void powerSaveOff() { }
+    void *touch() { return nullptr; } // touch not via LGFX
+    bool getTouch(int16_t *x, int16_t *y) { return false; }
 };
 
 static LGFX *tft = nullptr;
@@ -1554,6 +1576,8 @@ bool TFTDisplay::connect()
 #else
     tft = new LGFX;
 #endif
+
+    // FreeWili IO expander init is done in initVariant() (early boot)
 
     backlightEnable->set(true);
     LOG_INFO("Power to TFT Backlight");

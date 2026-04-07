@@ -766,7 +766,9 @@ void setup()
 
     // Init our SPI controller (must be before screen and lora)
 #ifdef ARCH_RP2040
-#ifdef HW_SPI1_DEVICE
+#if defined(FREEWILI)
+    // FreeWili uses UART radio — no SPI LoRa. SPI1 is managed by the display driver.
+#elif defined(HW_SPI1_DEVICE)
     SPI1.setSCK(LORA_SCK);
     SPI1.setTX(LORA_MOSI);
     SPI1.setRX(LORA_MISO);
@@ -778,7 +780,7 @@ void setup()
     SPI.setTX(LORA_MOSI);
     SPI.setRX(LORA_MISO);
     SPI.begin(false);
-#endif // HW_SPI1_DEVICE
+#endif // FREEWILI / HW_SPI1_DEVICE
 #elif ARCH_PORTDUINO
     if (portduino_config.lora_spi_dev != "ch341") {
         SPI.begin();

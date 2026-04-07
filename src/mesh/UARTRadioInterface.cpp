@@ -10,8 +10,16 @@
 #include <Arduino.h>
 #include <math.h>
 
-// We use Serial2 for the UART radio bridge.
-// Pin configuration comes from the variant header (UART_RADIO_TX_PIN, UART_RADIO_RX_PIN, UART_RADIO_BAUD).
+// UART radio bridge to WIO-E5.
+// On FreeWili, TX pin (GPIO 32) is UART0 and RX pin (GPIO 23) is UART1,
+// so we split across Serial1 (UART0, TX-only) and Serial2 (UART1, RX-only).
+#if defined(USE_SPLIT_UART_RADIO)
+#define RADIO_TX_SERIAL Serial1
+#define RADIO_RX_SERIAL Serial2
+#else
+#define RADIO_TX_SERIAL Serial2
+#define RADIO_RX_SERIAL Serial2
+#endif
 
 UARTRadioInterface::UARTRadioInterface() : RadioInterface() {}
 
@@ -22,10 +30,18 @@ bool UARTRadioInterface::init()
     // Call base class init (sets up observers, calls applyModemConfig)
     RadioInterface::init();
 
-    // Initialize UART to the WIO-E5 bridge
+#if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN) && defined(UART_RADIO_BAUD)
+#if defined(USE_SPLIT_UART_RADIO)
+    // TX on UART0 (Serial1), RX on UART1 (Serial2) — pins cross hardware UART boundaries
+    Serial1.setTX(UART_RADIO_TX_PIN);
+    Serial1.begin(UART_RADIO_BAUD);
+    Serial2.setRX(UART_RADIO_RX_PIN);
+    Serial2.begin(UART_RADIO_BAUD);
+#else
     Serial2.setTX(UART_RADIO_TX_PIN);
     Serial2.setRX(UART_RADIO_RX_PIN);
     Serial2.begin(UART_RADIO_BAUD);
+#endif
 
     LOG_INFO("UARTRadioInterface: UART initialized (TX=%d, RX=%d, baud=%d)", UART_RADIO_TX_PIN, UART_RADIO_RX_PIN,
              UART_RADIO_BAUD);
@@ -51,6 +67,9 @@ bool UARTRadioInterface::init()
     receiving = true;
 
     LOG_INFO("UARTRadioInterface: init complete, receiving");
+#else
+    LOG_WARN("UARTRadioInterface: UART pins not defined, radio disabled");
+#endif
     return true;
 }
 
@@ -122,10 +141,12 @@ uint32_t UARTRadioInterface::getPacketTime(uint32_t totalPacketLen, bool receive
 
 void UARTRadioInterface::processUART()
 {
-    while (Serial2.available()) {
-        uint8_t b = Serial2.read();
+#if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN)
+    while (RADIO_RX_SERIAL.available()) {
+        uint8_t b = RADIO_RX_SERIAL.read();
         parseByte(b);
     }
+#endif
 }
 
 void UARTRadioInterface::parseByte(uint8_t byte)
@@ -189,10 +210,12 @@ void UARTRadioInterface::parseByte(uint8_t byte)
 
 void UARTRadioInterface::sendCommand(uint8_t cmd, const uint8_t *payload, uint16_t len)
 {
+#if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN)
     uint8_t frameBuf[UART_RADIO_HEADER_SIZE + UART_RADIO_MAX_PAYLOAD + UART_RADIO_CRC_SIZE];
     uint16_t frameLen = uart_proto_build_frame(frameBuf, cmd, payload, len);
-    Serial2.write(frameBuf, frameLen);
-    Serial2.flush();
+    RADIO_TX_SERIAL.write(frameBuf, frameLen);
+    RADIO_TX_SERIAL.flush();
+#endif
 }
 
 void UARTRadioInterface::sendRadioConfig()

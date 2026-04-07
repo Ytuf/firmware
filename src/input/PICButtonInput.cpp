@@ -1,6 +1,12 @@
 #include "PICButtonInput.h"
 #include "configuration.h"
 
+// PIC16 buttons use SerialPIO — pins 38/39 are UART1 pins but both hardware UARTs are occupied
+#if defined(PIC_UART_TX_PIN) && defined(PIC_UART_RX_PIN)
+#include "SerialPIO.h"
+static SerialPIO picSerial(PIC_UART_TX_PIN, PIC_UART_RX_PIN, 64);
+#endif
+
 PICButtonInput *picButtonInput = nullptr;
 
 PICButtonInput::PICButtonInput() : concurrency::OSThread("PICButton")
@@ -10,18 +16,16 @@ PICButtonInput::PICButtonInput() : concurrency::OSThread("PICButton")
 void PICButtonInput::init()
 {
 #if defined(PIC_UART_RX_PIN) && defined(PIC_UART_TX_PIN)
-    Serial1.setRX(PIC_UART_RX_PIN);
-    Serial1.setTX(PIC_UART_TX_PIN);
-    Serial1.begin(PIC_UART_BAUD);
-    LOG_INFO("PICButtonInput initialized on RX=%d TX=%d baud=%d", PIC_UART_RX_PIN, PIC_UART_TX_PIN, PIC_UART_BAUD);
+    picSerial.begin(PIC_UART_BAUD);
+    LOG_INFO("PICButtonInput initialized on RX=%d TX=%d baud=%d (SerialPIO)", PIC_UART_RX_PIN, PIC_UART_TX_PIN, PIC_UART_BAUD);
 #endif
 }
 
 int32_t PICButtonInput::runOnce()
 {
 #if defined(PIC_UART_RX_PIN)
-    while (Serial1.available()) {
-        uint8_t byte = Serial1.read();
+    while (picSerial.available()) {
+        uint8_t byte = picSerial.read();
         switch (picState) {
         case WAIT_HEADER1:
             if (byte == PIC_SYNC1)

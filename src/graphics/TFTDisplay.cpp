@@ -431,13 +431,7 @@ static LGFX *tft = nullptr;
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
-#include <Wire.h> // For FT6336U touch I2C reads
-
-// Debug: last touch data (read via GDB)
-volatile int16_t dbg_rawX = -1, dbg_rawY = -1;
-volatile int16_t dbg_mappedX = -1, dbg_mappedY = -1;
-volatile uint8_t dbg_touchPts = 0, dbg_i2cErr = 0xFF;
-volatile uint32_t dbg_touchCount = 0;
+#include <Wire.h> // For FT5316 touch I2C reads
 
 #define TFT_BLACK 0x0000
 #define TFT_WHITE 0xFFFF
@@ -1558,34 +1552,31 @@ bool TFTDisplay::getTouch(int16_t *x, int16_t *y)
         return false;
     }
 #elif defined(FREEWILI)
-    // Direct I2C read from FT6336U (FT5x06 family) at TOUCH_ADDRESS (0x38)
+    // FT5316 (FT5x06 family) on I2C1 at TOUCH_ADDRESS (0x38)
+    // Only read I2C when TOUCH_INT is LOW (touch active) — chip NACKs when idle
+#ifdef SCREEN_TOUCH_INT
+    if (gpio_get(SCREEN_TOUCH_INT))
+        return false; // INT high = no touch
+#endif
     Wire.beginTransmission(TOUCH_ADDRESS);
-    Wire.write(0x02); // TD_STATUS register (number of touch points)
-    uint8_t i2cErr = Wire.endTransmission(false);
-    dbg_i2cErr = i2cErr;
-    if (i2cErr != 0)
+    Wire.write(0x02); // TD_STATUS register
+    if (Wire.endTransmission(false) != 0)
         return false;
-    Wire.requestFrom((uint8_t)TOUCH_ADDRESS, (uint8_t)5); // Read regs 0x02-0x06
+    Wire.requestFrom((uint8_t)TOUCH_ADDRESS, (uint8_t)5);
     if (Wire.available() < 5)
         return false;
-    uint8_t touchPoints = Wire.read() & 0x0F; // reg 0x02
-    uint8_t xHi = Wire.read(); // reg 0x03 (event + X high)
-    uint8_t xLo = Wire.read(); // reg 0x04 (X low)
-    uint8_t yHi = Wire.read(); // reg 0x05 (touch ID + Y high)
-    uint8_t yLo = Wire.read(); // reg 0x06 (Y low)
-    dbg_touchPts = touchPoints;
+    uint8_t touchPoints = Wire.read() & 0x0F;
+    uint8_t xHi = Wire.read();
+    uint8_t xLo = Wire.read();
+    uint8_t yHi = Wire.read();
+    uint8_t yLo = Wire.read();
     if (touchPoints == 0)
         return false;
     int16_t rawX = ((xHi & 0x0F) << 8) | xLo;
     int16_t rawY = ((yHi & 0x0F) << 8) | yLo;
-    dbg_rawX = rawX;
-    dbg_rawY = rawY;
     // Panel is 320x480 portrait, display uses MADCTL=0x2C (SWAP_XY | HORIZ_ORDER)
     *x = rawY;
     *y = 319 - rawX;
-    dbg_mappedX = *x;
-    dbg_mappedY = *y;
-    dbg_touchCount++;
     return true;
 #elif !defined(M5STACK) && !defined(HACKADAY_COMMUNICATOR) && !defined(HELTEC_MESH_NODE_T096)
     return tft->getTouch(x, y);

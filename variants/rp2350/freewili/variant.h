@@ -21,11 +21,12 @@
 #define BRIGHTNESS_DEFAULT 200
 #define USE_TFTDISPLAY 1
 
-// --- Touch (FT6336U via I2C) ---
+// --- Touch (FT5316/FT6336U via I2C) ---
 #define TOUCH_SCREEN
 #define HAS_TOUCHSCREEN 1
 #define TOUCH_I2C_PORT 0     // Wire (overridden to i2c1 via __WIRE0_DEVICE)
-#define TOUCH_ADDRESS 0x38   // FT6336U / FT5x06 family
+#define TOUCH_ADDRESS 0x38   // FT5316 (FT5x06 family, chip ID 0x11)
+#define SCREEN_TOUCH_INT 31  // GPIO31 — TOUCH_INT from schematic
 
 // --- I2C Bus ---
 // GPIO 26/27 are i2c1 pins. Wire is overridden to i2c1 via

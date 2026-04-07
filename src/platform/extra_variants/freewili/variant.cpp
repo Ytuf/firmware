@@ -47,23 +47,15 @@ void initVariant()
     initIOExpanderPicoSDK();
 }
 
-// Debug: I2C probe results from lateInitVariant
-volatile uint8_t dbg_late_ack = 0xFF;
-volatile uint8_t dbg_late_chipid = 0xFF;
-
 void lateInitVariant()
 {
-    // Probe FT6336U at 0x38 — does it ACK after I2C scanner ran?
-    Wire.beginTransmission(0x38);
-    dbg_late_ack = Wire.endTransmission();
-
-    // Try reading chip ID register (0xA8) — FT6336U should return 0x79
-    Wire.beginTransmission(0x38);
-    Wire.write(0xA8);
-    Wire.endTransmission(false);
-    Wire.requestFrom((uint8_t)0x38, (uint8_t)1);
-    if (Wire.available())
-        dbg_late_chipid = Wire.read();
+#ifdef SCREEN_TOUCH_INT
+    // Configure TOUCH_INT (GPIO31) as input with pull-up.
+    // FT5x06 drives this LOW when touch is active.
+    gpio_init(SCREEN_TOUCH_INT);
+    gpio_set_dir(SCREEN_TOUCH_INT, GPIO_IN);
+    gpio_pull_up(SCREEN_TOUCH_INT);
+#endif
 }
 
 #endif

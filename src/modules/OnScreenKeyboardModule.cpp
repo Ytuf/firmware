@@ -12,11 +12,7 @@
 namespace graphics
 {
 
-// Keyboard object whose destruction has been deferred from a stop() call that
-// came from inside the keyboard's own callback chain. Reaped at the start of
-// the next start() (or at module destruction). Without this, hitting Cancel on
-// the virtual keyboard hard-faulted in free() because the keyboard was busy
-// dispatching the callback that asked us to delete it.
+// Defer-deleted keyboard: stop() may be called from within the keyboard's own callback.
 static VirtualKeyboard *s_pendingDestroyKeyboard = nullptr;
 
 OnScreenKeyboardModule &OnScreenKeyboardModule::instance()
@@ -40,8 +36,6 @@ OnScreenKeyboardModule::~OnScreenKeyboardModule()
 void OnScreenKeyboardModule::start(const char *header, const char *initialText, uint32_t durationMs,
                                    std::function<void(const std::string &)> cb)
 {
-    // Reap any keyboard from a prior cancel/submit where the delete had to be
-    // deferred. We're outside any keyboard callback frame here, so it's safe.
     if (s_pendingDestroyKeyboard) {
         delete s_pendingDestroyKeyboard;
         s_pendingDestroyKeyboard = nullptr;
@@ -76,11 +70,7 @@ void OnScreenKeyboardModule::stop(bool callEmptyCallback)
     auto cb = callback;
     callback = nullptr;
     if (keyboard) {
-        // Defer the delete: stop() is called from within the keyboard's own
-        // setCallback lambda (cancel / submit path), so the keyboard object
-        // is still on the call stack. Freeing it here is a use-after-free
-        // when we return up through processInput. Stash and let the next
-        // start() reap it from a clean call frame.
+        // Defer delete: stop() runs inside keyboard's own callback; freeing here is use-after-free.
         if (s_pendingDestroyKeyboard && s_pendingDestroyKeyboard != keyboard)
             delete s_pendingDestroyKeyboard;
         s_pendingDestroyKeyboard = keyboard;
@@ -111,10 +101,7 @@ bool OnScreenKeyboardModule::processVirtualKeyboardInput(const InputEvent &event
     if (!targetKeyboard)
         return false;
 
-    // Touchscreen tap: TouchScreenImpl1 maps TOUCH_ACTION_TAP → USER_PRESS
-    // and carries the screen coordinate in touchX/touchY. Map that to a
-    // specific keyboard key (if any) and treat it as a direct press rather
-    // than as the "move cursor right" semantics USER_PRESS otherwise has.
+    // Touchscreen tap: USER_PRESS with non-zero touchX/touchY = direct key press at coord.
     if ((event.inputEvent == INPUT_BROKER_USER_PRESS) &&
         (event.touchX != 0 || event.touchY != 0)) {
         if (targetKeyboard->selectKeyAt(event.touchX, event.touchY)) {

@@ -1437,13 +1437,7 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
                        bool fullAtomic)
 {
 #if defined(FREEWILI)
-    // RP2350 SMP + arduino-pico LittleFS hang. Any flash write (NodeInfo
-    // broadcast updates NodeDatabase, position broadcast saves owner, key
-    // verification saves keys, settings change saves config, etc.) calls
-    // __freertos_idle_other_core which never returns because Core 1 won't
-    // enter idle. saveToDisk was the only path I caught earlier, but
-    // NodeInfo TX paths also go directly through saveProto. No-op the whole
-    // thing — we lose flash persistence but the device stays responsive.
+    // RP2350 SMP + arduino-pico LittleFS hang on flash write; persistence disabled.
     (void)filename; (void)protoSize; (void)fields; (void)dest_struct; (void)fullAtomic;
     return true;
 #endif
@@ -1605,14 +1599,7 @@ bool NodeDB::saveToDisk(int saveWhat)
     LOG_DEBUG("Save to disk %d", saveWhat);
 
 #if defined(FREEWILI)
-    // RP2350 SMP + arduino-pico LittleFS hang: saveProto attempts a flash
-    // write that calls __freertos_idle_other_core to halt Core 1, but Core 1
-    // doesn't enter idle and the whole system locks up. Symptom: pressing
-    // any menu item that toggles a config (notifications, region, preset,
-    // backlight, etc.) freezes the device. Until the SMP+flash sync is
-    // fixed, no-op all persistence on FreeWili. We lose flash persistence
-    // but the device stays responsive; main.cpp re-applies the critical
-    // RAM-only defaults (region=US, override_frequency) every boot.
+    // RP2350 SMP + arduino-pico LittleFS hang on flash write; persistence disabled.
     (void)saveWhat;
     return true;
 #endif

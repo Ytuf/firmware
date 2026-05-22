@@ -3,7 +3,6 @@
 extern "C" void freewili_set_tz(const char *tz);
 #endif
 
-// Diagnostic counter defined in UARTRadioInterface.cpp at global scope.
 extern volatile uint32_t g_menu_position_branch;
 #if HAS_SCREEN
 #include "ClockRenderer.h"
@@ -483,10 +482,7 @@ void menuHandler::TZPicker()
             config.device.tzdef[sizeof(config.device.tzdef) - 1] = '\0';
 
 #if defined(FREEWILI)
-            // setenv() hardfaults on this RP2350 + Arduino-Pico newlib build
-            // (see variant.cpp for details). freewili_set_tz() writes the new
-            // TZ into a pre-allocated environ slot and calls tzset(), which
-            // is what setenv("TZ", ...) effectively does on a working stack.
+            // setenv() hardfaults on this RP2350 newlib build; use pre-allocated environ slot.
             freewili_set_tz(config.device.tzdef);
 #else
             setenv("TZ", config.device.tzdef, 1);
@@ -693,8 +689,7 @@ void menuHandler::replyMenu()
             return;
         }
 
-        // Freetext reply: defer through FreetextLaunchMenu so the popup keyboard
-        // sets up cleanly outside the banner-callback frame.
+        // Freetext reply: defer through FreetextLaunchMenu so keyboard sets up outside banner-callback frame.
         if (selected == ReplyFreetext) {
             if (mode == graphics::MessageRenderer::ThreadMode::CHANNEL) {
                 menuHandler::pendingFreetextDest = NODENUM_BROADCAST;
@@ -971,10 +966,6 @@ void menuHandler::homeBaseMenu()
     }
     optionsEnumArray[options++] = Position;
 
-    // Navigation into the upstream Meshtastic menu tree. These already exist
-    // (loraMenu, NodePickerMenu, systemBaseMenu) but had no entry point from
-    // the FreeWili home menu, so settings, region/preset, channel, and
-    // initiating a DM to a picked node were unreachable.
     optionsArray[options] = "Nodes";
     optionsEnumArray[options++] = Nodes;
     optionsArray[options] = "LoRa";
@@ -1031,10 +1022,7 @@ void menuHandler::homeBaseMenu()
             if (service->trySendPosition(NODENUM_BROADCAST, true)) {
                 IF_SCREEN(screen->showSimpleBanner("Position\nSent", 3000));
             } else {
-                // No GPS — upstream code shows "Node Info Sent" banner without
-                // actually transmitting anything. Trigger a real NodeInfo
-                // broadcast so the banner matches reality and the mesh learns
-                // about us.
+                // No GPS — broadcast NodeInfo so "Node Info Sent" banner reflects an actual TX.
                 if (nodeInfoModule) {
                     nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, true, 0, false);
                 }
@@ -1043,8 +1031,6 @@ void menuHandler::homeBaseMenu()
         } else if (selected == Preset) {
             cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
         } else if (selected == Freetext) {
-            // Defer to next dispatch so the banner cleanup doesn't race with
-            // showTextInput's overlay setup (same fix pattern as Identity).
             menuHandler::pendingFreetextDest = NODENUM_BROADCAST;
             menuHandler::pendingFreetextChannel = 0;
             menuHandler::menuQueue = menuHandler::FreetextLaunchMenu;
@@ -1427,9 +1413,6 @@ void menuHandler::manageNodeMenu()
     static int optionsEnumArray[enumEnd] = {Back};
     int options = 1;
 
-    // Lets the user DM the node they just picked from NodePicker. Upstream
-    // manageNodeMenu didn't include this — DMs were only reachable as replies
-    // to received messages.
     optionsArray[options] = "Send Message";
     optionsEnumArray[options++] = SendMessage;
 
@@ -2713,11 +2696,7 @@ void menuHandler::identityMenu()
     bannerOptions.message = "Identity";
     bannerOptions.optionsArrayPtr = labels;
     bannerOptions.optionsCount = 3;
-    // Don't call showTextInput inline from the banner callback: the banner's
-    // own cleanup runs after our callback and tears down the text-input state
-    // we'd try to install. Instead, queue another menu to fire on the next
-    // dispatch tick; setShortNameMenu / setLongNameMenu then call showTextInput
-    // from a clean state.
+    // Queue showTextInput on next dispatch tick — banner cleanup races inline calls.
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == SetShort) {
             menuHandler::menuQueue = menuHandler::SetShortNameMenu;
@@ -2730,11 +2709,7 @@ void menuHandler::identityMenu()
     screen->showOverlayBanner(bannerOptions);
 }
 
-// Push the current `owner` user struct into our own NodeDB entry. UIRenderer
-// reads long_name from ourNode->user.long_name (NodeDB), not from owner — so
-// without this the home screen's long name stays stale until a reboot loads
-// it back from disk. Channel index 0 = primary; nodeDB->updateUser copies
-// fields into the local entry and notifies observers so screens redraw.
+// UIRenderer reads long_name from nodeDB entry, not owner — push owner into NodeDB.
 static void freewili_push_owner_to_nodedb()
 {
     if (!nodeDB) return;
@@ -2775,14 +2750,8 @@ void menuHandler::setLongNameMenu()
         });
 }
 
-// ===== Channel Editor =====
-// Multi-step flow: pick (or new) → name → passphrase → role → save.
-// Held in static editingChannelIndex (-1 means "create new — pick next free slot
-// when we save"). The name and PSK fields are written straight into the live
-// channelFile entry as the user fills them; role-pick is the commit step that
-// also calls setChannel/reloadConfig so the radio stack picks up the change.
+// Channel editor: pick (or new) → name → passphrase → role → save.
 
-// Diagnostic counters so we can SWD-confirm the dispatch + keyboard launch.
 volatile uint32_t g_freetext_dispatch_count __attribute__((used)) = 0;
 volatile uint32_t g_freetext_showinput_count __attribute__((used)) = 0;
 volatile uint32_t g_freetext_callback_count __attribute__((used)) = 0;
@@ -2793,18 +2762,14 @@ void menuHandler::freetextLaunchMenu()
     g_freetext_dispatch_count++;
     if (!cannedMessageModule) return;
     g_freetext_showinput_count++;
-    // We're now outside the banner callback frame, so LaunchFreetextWithDestination's
-    // showTextInput call (on FREEWILI) can set up its overlay safely.
     cannedMessageModule->LaunchFreetextWithDestination(pendingFreetextDest, pendingFreetextChannel);
 }
 
 void menuHandler::channelEditorMenu()
 {
-    // List existing non-disabled channels + "+ New Channel" entry, then chain
-    // into the name editor when picked.
-    static const uint8_t kMaxRows = 9;  // Back + 8 channels (incl. New)
+    static const uint8_t kMaxRows = 9;
     static const char *labels[kMaxRows];
-    static int picked_index[kMaxRows];     // channel slot per label, -1 = New, -2 = Back
+    static int picked_index[kMaxRows];
     static char nameBufs[kMaxRows][16];
 
     int count = 0;
@@ -2831,11 +2796,9 @@ void menuHandler::channelEditorMenu()
     bannerOptions.optionsArrayPtr = labels;
     bannerOptions.optionsCount = count;
     bannerOptions.bannerCallback = [](int selected) -> void {
-        if (selected <= 0) return;  // Back or out of range
+        if (selected <= 0) return;
         int slot = picked_index[selected];
         if (slot == -1) {
-            // Find the lowest DISABLED slot to use as a new channel. If none
-            // free, fall back to slot 1 (slot 0 is the primary).
             int newSlot = -1;
             int n = channels.getNumChannels();
             for (int i = 1; i < n; ++i) {
@@ -2846,8 +2809,6 @@ void menuHandler::channelEditorMenu()
             }
             if (newSlot < 0) newSlot = (n >= 1) ? 1 : 0;
             editingChannelIndex = newSlot;
-            // Initialize the slot to a clean state: zero name, empty PSK,
-            // role=DISABLED (will be set in the role step).
             meshtastic_Channel ch = channels.getByIndex((uint8_t)newSlot);
             ch.index = newSlot;
             ch.has_settings = true;
@@ -2889,8 +2850,7 @@ void menuHandler::channelEditPskMenu()
         "Passphrase (blank=public)", "", 60000, [](const std::string &text) {
             if (editingChannelIndex < 0) return;
             meshtastic_Channel ch = channels.getByIndex((uint8_t)editingChannelIndex);
-            // Convert passphrase to 16-byte AES128 PSK: ASCII pad/truncate.
-            // Empty passphrase → PSK size 0 (no encryption, public channel).
+            // Passphrase → 16-byte AES128 PSK; empty = public (size 0).
             memset(ch.settings.psk.bytes, 0, sizeof(ch.settings.psk.bytes));
             if (text.empty()) {
                 ch.settings.psk.size = 0;
@@ -2924,9 +2884,6 @@ void menuHandler::channelEditRoleMenu()
         else if (selected == Primary) ch.role = meshtastic_Channel_Role_PRIMARY;
         ch.has_settings = true;
         channels.setChannel(ch);
-        // Reload the channel config so the radio stack picks up the new
-        // primary/PSK/etc. saveProto is no-op on FREEWILI so this only
-        // updates in-memory state — that's enough until reboot.
         if (service) service->reloadConfig(SEGMENT_CHANNELS);
         editingChannelIndex = -1;
     };
@@ -2935,14 +2892,10 @@ void menuHandler::channelEditRoleMenu()
 
 void menuHandler::channelPickerMenu()
 {
-    // Enumerate currently-configured channels and let the user pick one to
-    // compose a broadcast message on. Without this, every text message goes
-    // out on the primary channel (channel 0). Useful when multiple channels
-    // are configured (LongFast public + private channels, etc.).
     static const uint8_t kMaxChannels = 8;
-    static const char *labels[kMaxChannels + 1];   // +1 for "Back"
+    static const char *labels[kMaxChannels + 1];
     static int enumValues[kMaxChannels + 1];
-    static int channelIndices[kMaxChannels + 1];   // parallel: which channel each option targets
+    static int channelIndices[kMaxChannels + 1];
     static char nameBufs[kMaxChannels][16];
 
     int count = 0;
@@ -2954,9 +2907,7 @@ void menuHandler::channelPickerMenu()
     int numCh = channels.getNumChannels();
     if (numCh > kMaxChannels) numCh = kMaxChannels;
     for (int i = 0; i < numCh; ++i) {
-        // Skip slots not in use — their getName() falls back to the modem
-        // preset ("LongFast"), so showing them produced "LongFast" repeated
-        // with no way to differentiate.
+        // Skip unused slots — getName() falls back to modem preset and produces dupes.
         const meshtastic_Channel &ch = channels.getByIndex((uint8_t)i);
         if (ch.role == meshtastic_Channel_Role_DISABLED) continue;
 

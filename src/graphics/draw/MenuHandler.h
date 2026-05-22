@@ -129,11 +129,7 @@ class menuHandler
     static void channelEditPskMenu();
     static void channelEditRoleMenu();
     static void freetextLaunchMenu();
-    // Channel-being-edited state, used across the multi-step editor flow.
     static int editingChannelIndex;
-    // Pending freetext launch parameters (set by a banner callback that
-    // wants to launch the popup keyboard; consumed by freetextLaunchMenu
-    // on the next dispatch tick).
     static uint32_t pendingFreetextDest;
     static uint8_t  pendingFreetextChannel;
 

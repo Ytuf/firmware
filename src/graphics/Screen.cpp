@@ -1078,8 +1078,6 @@ void Screen::setFrames(FrameFocus focus)
     normalFrames[numframes++] = graphics::MessageRenderer::drawTextMessageFrame;
     indicatorIcons.push_back(icon_mail);
 
-// FreeWili gets individual per-mode frames instead of the rotating combined
-// ones, so user can navigate directly to (and stay on) the view they want.
 #if !defined(USE_EINK) && !defined(FREEWILI)
     if (!hiddenFrames.nodelist_nodes) {
         fsi.positions.nodelist_nodes = numframes;
@@ -1093,7 +1091,6 @@ void Screen::setFrames(FrameFocus focus)
     }
 #endif
 
-// Show detailed per-mode views on E-Ink AND FreeWili builds.
 #if defined(USE_EINK) || defined(FREEWILI)
     if (!hiddenFrames.nodelist_lastheard) {
         fsi.positions.nodelist_lastheard = numframes;
@@ -1644,8 +1641,6 @@ int Screen::handleUIFrameEvent(const UIFrameEvent *event)
     return 0;
 }
 
-// SWD-inspectable counters for input event diagnosis. Updated unconditionally
-// before any early-return so we can see what events Screen actually receives.
 volatile uint32_t g_input_total       __attribute__((used)) = 0;
 volatile uint32_t g_input_select      __attribute__((used)) = 0;
 volatile uint32_t g_input_left        __attribute__((used)) = 0;
@@ -1678,6 +1673,21 @@ int Screen::handleInputEvent(const InputEvent *event)
     LOG_INPUT("Screen Input event %u! kb %u", event->inputEvent, event->kbchar);
     if (!screenOn)
         return 0;
+
+    if (event->inputEvent == INPUT_BROKER_HOME) {
+        if (framesetInfo.positions.home != 255) {
+            ui->switchToFrame(framesetInfo.positions.home);
+            setFastFramerate();
+        }
+        return 0;
+    }
+    if (event->inputEvent == INPUT_BROKER_MESSAGES) {
+        if (framesetInfo.positions.textMessage != 255) {
+            ui->switchToFrame(framesetInfo.positions.textMessage);
+            setFastFramerate();
+        }
+        return 0;
+    }
 
     // Handle text input notifications specially - pass input to virtual keyboard
     if (NotificationRenderer::current_notification_type == notificationTypeEnum::text_input) {
@@ -1811,9 +1821,6 @@ int Screen::handleInputEvent(const InputEvent *event)
                 // Long press down button for fast frame switching
                 showNextFrame();
 #if !defined(FREEWILI)
-            // FreeWili: stop auto-opening the preset-message picker on Up/Down
-            // while at the home frame — user found it unexpected. On other
-            // boards this fast-path remains.
             } else if ((event->inputEvent == INPUT_BROKER_UP || event->inputEvent == INPUT_BROKER_DOWN) &&
                        this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
                 cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);

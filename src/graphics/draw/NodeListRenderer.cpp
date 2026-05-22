@@ -146,11 +146,7 @@ static int getNodeNameMaxWidth(int columnWidth, int baseWidth)
 unsigned long getModeCycleIntervalMs()
 {
 #if defined(FREEWILI)
-    // FreeWili: stop the auto-rotation between node-list modes (Last Heard /
-    // Hops-Signal, Distance / Bearing). The 3-second flip makes it impossible
-    // to stay on a chosen view. Returning a huge interval effectively pins the
-    // mode; user can still cycle via the FrameToggles menu's Show/Hide entries.
-    return 24UL * 60UL * 60UL * 1000UL;
+    return 24UL * 60UL * 60UL * 1000UL;  // pin mode; auto-rotation disabled
 #else
     return 3000;
 #endif
@@ -748,10 +744,6 @@ void drawDynamicListScreen_Location(OLEDDisplay *display, OLEDDisplayUiState *st
 }
 #endif
 
-// Individual per-mode renderers. Originally only built for E-Ink (and the
-// non-eink path used the rotating drawDynamicListScreen_* functions). FreeWili
-// needs them too because the auto-rotation makes a chosen view impossible to
-// stay on; we expose each variant as its own frame instead.
 #if defined(USE_EINK) || defined(FREEWILI)
 void drawLastHeardScreen(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {

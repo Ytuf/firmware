@@ -16,12 +16,7 @@
 #include <graphics/NomadStarLED.h>
 #endif
 
-// FreeWili: the LED chain has an INVERTING buffer between MCU and chain DIN.
-// Adafruit_NeoPixel drives un-inverted via PIO, so its pixels.show() ends up
-// sending inverted data to the chain. The variant's own PIO-based driver in
-// variant.cpp handles inversion via GPIO_OVERRIDE_INVERT, so on FreeWili we
-// compile out the NeoPixel calls in this thread and let the variant drive
-// the chain exclusively.
+// FreeWili LED chain has inverting buffer; variant.cpp drives it directly.
 #if defined(HAS_NEOPIXEL) && !defined(FREEWILI)
 #include <Adafruit_NeoPixel.h>
 #define HAS_NEOPIXEL_MESHTASTIC 1

@@ -24,12 +24,8 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
 #endif
 
 #if defined(FREEWILI)
-    // New text message arrived: blue blink across all LEDs + 880 Hz tone.
-    // Distinct from the generic green RX blink in UARTRadioInterface — that
-    // fires for every received packet (telemetry, position, etc.), this only
-    // fires for actual text messages addressed to us.
-    freewili_led_pulse_all(/*r=*/0, /*g=*/8, /*b=*/30, /*duration_ms=*/60);
-    freewili_audio_play_rx();  // 880 Hz, 80 ms — bit-bang blocks CPU briefly
+    freewili_led_pulse_all(0, 8, 30, 60);
+    freewili_audio_play_rx();
 #endif
     // add packet ID to the rolling list of packets
     textPacketList[textPacketListIndex] = mp.id;

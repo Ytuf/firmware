@@ -69,11 +69,7 @@ CannedMessageModule::CannedMessageModule()
     this->loadProtoForModule();
     bool hasInputSource = (cardkb_found.address != 0x00) || INPUTBROKER_MATRIX_TYPE;
 #if defined(USE_VIRTUAL_KEYBOARD)
-    // Touch-screen builds without a physical keyboard use the in-module
-    // virtual keyboard, so the module needs to be active to receive touch
-    // input even when no canned messages are configured. Without this, taps
-    // on the freetext compose screen never reach handleInputEvent and the
-    // user gets trapped with no way to type or dismiss.
+    // Touch builds need this module active to receive virtual-keyboard input.
     hasInputSource = true;
 #endif
     if ((this->splitConfiguredMessages() <= 0) && !hasInputSource) {
@@ -140,9 +136,7 @@ void CannedMessageModule::LaunchFreetextWithDestination(NodeNum newDest, uint8_t
     lastDestSet = true;
 
 #if defined(FREEWILI)
-    // Route through the OnScreenKeyboardModule popup (same path as Identity /
-    // Channel-editor name input) instead of the in-frame FREETEXT keyboard.
-    // User prefers the popup keyboard's layout and behavior.
+    // Route through OnScreenKeyboardModule popup instead of in-frame FREETEXT keyboard.
     if (screen) {
         char headerBuffer[64];
         if (dest == NODENUM_BROADCAST) {
@@ -152,7 +146,7 @@ void CannedMessageModule::LaunchFreetextWithDestination(NodeNum newDest, uint8_t
         }
         screen->showTextInput(headerBuffer, "", 300000, [this](const std::string &text) {
             if (text.empty())
-                return;  // cancel — no send
+                return;
             this->freetext = text.c_str();
             this->payload = CANNED_MESSAGE_RUN_STATE_FREETEXT;
             updateState(CANNED_MESSAGE_RUN_STATE_SENDING_ACTIVE);
@@ -768,13 +762,9 @@ bool CannedMessageModule::handleMessageSelectorInput(const InputEvent *event, bo
             return true;
         }
 #else
-        // FreeWili: route through showTextInput so messaging uses the same
-        // VirtualKeyboard popup (with tap-to-type) as the Identity / channel
-        // editors. The CANNED_MESSAGE_RUN_STATE_FREETEXT in-frame keyboard is
-        // a different, less polished implementation.
         if (strcmp(current, "[-- Free Text --]") == 0) {
 #if defined(FREEWILI)
-            if (screen) {  // FREEWILI: osk_found may be false; use showTextInput unconditionally
+            if (screen) {
 #else
             if (osk_found && screen) {
 #endif

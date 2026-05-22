@@ -1,10 +1,5 @@
 #include "PICButtonInput.h"
 #include "configuration.h"
-#if defined(FREEWILI)
-// Audio tone hook — green button plays a chirp for demo / verification.
-extern "C" void freewili_audio_tone(uint32_t freq_hz, uint32_t duration_ms);
-extern "C" void freewili_audio_play_click(void);
-#endif
 
 // PIC16 buttons use SerialPIO — pins 38/39 are UART1 pins but both hardware UARTs are occupied
 #if defined(PIC_UART_TX_PIN) && defined(PIC_UART_RX_PIN)
@@ -96,21 +91,7 @@ void PICButtonInput::processButtonChange(uint16_t buttons)
     if (pressed & BTN_CANCEL)
         emitEvent(INPUT_BROKER_CANCEL);
     if (pressed & BTN_HOME)
-        emitEvent(INPUT_BROKER_BACK);
-    if (pressed & BTN_RED)
-        emitEvent(INPUT_BROKER_FN_F1);
-    if (pressed & BTN_BLUE)
-        emitEvent(INPUT_BROKER_FN_F2);
-    if (pressed & BTN_GREEN) {
-        // Soft click feedback (2 kHz, 20 ms) — same as any other button.
-        // Bit-bang blocks CPU for ~20 ms, fine for click-feel feedback.
-        freewili_audio_play_click();
-        emitEvent(INPUT_BROKER_FN_F3);
-    }
-    if (pressed & BTN_YELLOW)
-        emitEvent(INPUT_BROKER_FN_F4);
-    if (pressed & BTN_GREY)
-        emitEvent(INPUT_BROKER_FN_F5);
+        emitEvent(INPUT_BROKER_HOME);
     if (pressed & BTN_AI)
-        emitEvent(INPUT_BROKER_FN_F5);
+        emitEvent(INPUT_BROKER_MESSAGES);
 }

@@ -427,13 +427,13 @@ class LGFX : public lgfx::LGFX_Device
 static LGFX *tft = nullptr;
 
 #elif defined(FREEWILI)
-// Pico SDK-based ST7789 driver — bypasses LovyanGFX which breaks SPI on RP2350
+// Pico-SDK ST7789 driver; LovyanGFX breaks SPI on RP2350.
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
-#include "hardware/i2c.h" // For raw pico-sdk i2c_*_blocking_until in getTouch
+#include "hardware/i2c.h"
 #include "pico/time.h"
-#include <Wire.h> // For FT5316 touch I2C reads
+#include <Wire.h>
 
 #define TFT_BLACK 0x0000
 #define TFT_WHITE 0xFFFF
@@ -457,23 +457,20 @@ class LGFX {
     void spiDat8(uint8_t d) { spiDat(&d, 1); }
 
 public:
-    void *_panel_instance = nullptr; // stub for hasTouch check
+    void *_panel_instance = nullptr;
 
     void init() {
         if (_inited) return;
         _inited = true;
 
-        // Full SPI1 init from scratch using Pico SDK
-        // (Arduino SPI.begin() on SPI0 may have corrupted SPI1 state)
         spi_init(spi1, 40000000);
         spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
-        gpio_set_function(ST7789_SCK, GPIO_FUNC_SPI);  // GPIO 10
-        gpio_set_function(ST7789_SDA, GPIO_FUNC_SPI);  // GPIO 11
+        gpio_set_function(ST7789_SCK, GPIO_FUNC_SPI);
+        gpio_set_function(ST7789_SDA, GPIO_FUNC_SPI);
         gpio_init(ST7789_CS); gpio_set_dir(ST7789_CS, GPIO_OUT); gpio_put(ST7789_CS, 1);
         gpio_init(ST7789_RS); gpio_set_dir(ST7789_RS, GPIO_OUT); gpio_put(ST7789_RS, 1);
         gpio_init(ST7789_BL); gpio_set_dir(ST7789_BL, GPIO_OUT); gpio_put(ST7789_BL, 1);
 
-        // ST7789 init sequence
         spiCmd(0x01); sleep_ms(150);   // SW reset
         spiCmd(0x11); sleep_ms(500);   // Sleep out
         spiCmd(0x3A); spiDat8(0x05);   // 16-bit color
@@ -501,7 +498,6 @@ public:
         spiCmd(0x2A); spiDat8(x1>>8); spiDat8(x1); spiDat8(x2>>8); spiDat8(x2);
         spiCmd(0x2B); spiDat8(y1>>8); spiDat8(y1); spiDat8(y2>>8); spiDat8(y2);
         spiCmd(0x2C);
-        // data is in big-endian RGB565 already from Meshtastic
         gpio_put(ST7789_RS, 1); gpio_put(ST7789_CS, 0);
         spi_write_blocking(spi1, (const uint8_t *)data, w * h * 2);
         gpio_put(ST7789_CS, 1);
@@ -515,7 +511,7 @@ public:
         pwm_set_gpio_level(ST7789_BL, b * b); // quadratic for perceived linearity
     }
 
-    void setRotation(uint8_t r) { /* rotation handled by MADCTL in init() */ }
+    void setRotation(uint8_t r) { }
     void setSwapBytes(bool s) { }
     void displayOn() { spiCmd(0x29); }
     void displayOff() { spiCmd(0x28); }
@@ -523,7 +519,7 @@ public:
     void sleep() { spiCmd(0x10); sleep_ms(5); }
     void powerSaveOn() { }
     void powerSaveOff() { }
-    void *touch() { return nullptr; } // touch not via LGFX
+    void *touch() { return nullptr; }
     bool getTouch(int16_t *x, int16_t *y) { return false; }
 };
 
@@ -1554,13 +1550,8 @@ bool TFTDisplay::getTouch(int16_t *x, int16_t *y)
         return false;
     }
 #elif defined(FREEWILI)
-    // FT5316 (FT5x06 family) on I2C1 at TOUCH_ADDRESS (0x38).
-    // Bypass Arduino Wire: arduino-pico's TwoWire::endTransmission ignores the
-    // setTimeout() value and can block on bus contention for *seconds*. That
-    // shows up as a multi-second total UI freeze because the touch poll thread
-    // blocks everything behind it. Call pico-sdk's i2c_*_blocking_until with
-    // an explicit 2 ms deadline so a hung transaction fails fast and the next
-    // poll just retries.
+    // FT5316 on I2C1 @ 0x38. Use pico-sdk i2c_*_blocking_until with 2 ms deadline;
+    // arduino-pico's Wire endTransmission can block for seconds and freezes the UI.
     extern volatile uint32_t g_touch_i2c_fail_count;
     extern volatile uint32_t g_touch_i2c_ok_count;
     uint8_t reg = 0x02; // TD_STATUS
@@ -1582,21 +1573,13 @@ bool TFTDisplay::getTouch(int16_t *x, int16_t *y)
             return false;
         int16_t rawX = ((xHi & 0x0F) << 8) | xLo;
         int16_t rawY = ((yHi & 0x0F) << 8) | yLo;
-        // Touch-coord diagnostic globals. Read via SWD while tapping known
-        // points on the screen to derive a correct transform.
         extern volatile int16_t g_touch_raw_x;
         extern volatile int16_t g_touch_raw_y;
         extern volatile int16_t g_touch_screen_x;
         extern volatile int16_t g_touch_screen_y;
         g_touch_raw_x = rawX;
         g_touch_raw_y = rawY;
-        // Calibrated from FT5316 readings on FW2 hardware (2026-05-21):
-        //   top-left  → raw_x=290, raw_y=8       expected screen (0, 0)
-        //   bot-right → raw_x=0,   raw_y=478     expected screen (479, 319)
-        // So rawY spans 0..479 = screen X directly (no inversion), and rawX
-        // spans 0..319 inverted = screen Y (rawX=319 is top, rawX=0 is bottom).
-        // Old code assumed rawX was on a 0..479 range and scaled by 320/480;
-        // that's why a tap at the top landed in the middle of the screen.
+        // FT5316: rawY 0..479 = screen X; rawX 0..319 inverted = screen Y.
         if (rawX > 319) rawX = 319;
         if (rawY > 479) rawY = 479;
         *x = rawY;
@@ -1637,8 +1620,6 @@ bool TFTDisplay::connect()
 #else
     tft = new LGFX;
 #endif
-
-    // FreeWili IO expander init is done in initVariant() (early boot)
 
     backlightEnable->set(true);
     LOG_INFO("Power to TFT Backlight");

@@ -39,10 +39,7 @@ class VirtualKeyboard
     void handlePress();
     void handleLongPress();
 
-    // Touch tap support: if (touchX, touchY) falls within a key, move the
-    // cursor to that key. Returns true when a key was hit (caller should then
-    // call handlePress() to actually type/activate it). False = touch was
-    // outside the key grid (e.g. on the input/header area) — ignore it.
+    // Move cursor to key under (touchX, touchY). Returns true if hit; caller invokes handlePress().
     bool selectKeyAt(int16_t touchX, int16_t touchY);
 
     // Timeout management
@@ -69,10 +66,8 @@ class VirtualKeyboard
     uint32_t lastActivityTime;
     static const uint32_t TIMEOUT_MS = 60000; // 1 minute timeout
 
-    // Pixel layout cache, written at the end of draw() so selectKeyAt() can
-    // map a touch coordinate back to a row/col without recomputing geometry.
     int16_t m_lastOffsetY = 0;
-    int16_t m_lastKeyTopY = 0;       // pixel Y of the top of the key grid
+    int16_t m_lastKeyTopY = 0;
     int     m_lastCellH = 0;
     int     m_lastColX[KEYBOARD_COLS] = {0};
     int     m_lastColW[KEYBOARD_COLS] = {0};

@@ -2,6 +2,9 @@
 
 #include "RadioInterface.h"
 #include "UARTRadioProtocol.h"
+#if defined(ARCH_RP2040)
+#include "hardware/gpio.h"
+#endif
 
 /**
  * RadioInterface implementation that communicates with an external WIO-E5
@@ -9,6 +12,12 @@
  *
  * This is used on platforms (like FreeWili/RP2350) where the LoRa radio
  * is not directly connected via SPI but instead via a UART bridge MCU.
+ *
+ * Polling: `freewili_poll_uart_radio()` (free function below) must be called
+ * regularly from the main loop. UARTRadioInterface deliberately does NOT
+ * inherit OSThread on this platform — multi-inheritance with RadioInterface
+ * was preventing the OSThread base from being scheduled (counters showed
+ * runOnce never fired). The free function gets called from main.cpp's loop().
  */
 class UARTRadioInterface : public RadioInterface
 {
@@ -45,6 +54,8 @@ class UARTRadioInterface : public RadioInterface
 
     bool txPending = false;
     bool receiving = false;
+    bool bridgeAlive = false;       // set true once we've received any byte from the bridge
+    uint32_t lastReinitMs = 0;      // millis() of last re-init attempt while bridge is silent
 
     /**
      * Send a framed command to the bridge over UART.
@@ -67,3 +78,9 @@ class UARTRadioInterface : public RadioInterface
      */
     void parseByte(uint8_t byte);
 };
+
+// Hook for the main loop on platforms that don't have an OSThread for this
+// interface. The UARTRadioInterface constructor stashes a `this` pointer in a
+// file-static and this function calls processUART() on it. Safe to call
+// before init() (no-op if the interface hasn't been created yet).
+extern "C" void freewili_poll_uart_radio(void);

@@ -105,6 +105,8 @@ class Power : private concurrency::OSThread
     bool analogInit();
     /// Setup cw2015 battery level sensor
     bool cw2015Init();
+    /// Setup a BQ27441-G1 fuel gauge (direct I2C, no charger combo)
+    bool bq27441Init();
     /// Setup a 17048 battery level sensor
     bool max17048Init();
     /// Setup a Lipo charger

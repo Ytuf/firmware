@@ -1436,6 +1436,17 @@ void NodeDB::loadFromDisk()
 bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
                        bool fullAtomic)
 {
+#if defined(FREEWILI)
+    // RP2350 SMP + arduino-pico LittleFS hang. Any flash write (NodeInfo
+    // broadcast updates NodeDatabase, position broadcast saves owner, key
+    // verification saves keys, settings change saves config, etc.) calls
+    // __freertos_idle_other_core which never returns because Core 1 won't
+    // enter idle. saveToDisk was the only path I caught earlier, but
+    // NodeInfo TX paths also go directly through saveProto. No-op the whole
+    // thing — we lose flash persistence but the device stays responsive.
+    (void)filename; (void)protoSize; (void)fields; (void)dest_struct; (void)fullAtomic;
+    return true;
+#endif
 
     // do not try to save anything if power level is not safe. In many cases flash will be lock-protected
     // and all writes will fail anyway. Device should be sleeping at this point anyway.
@@ -1592,6 +1603,19 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
 bool NodeDB::saveToDisk(int saveWhat)
 {
     LOG_DEBUG("Save to disk %d", saveWhat);
+
+#if defined(FREEWILI)
+    // RP2350 SMP + arduino-pico LittleFS hang: saveProto attempts a flash
+    // write that calls __freertos_idle_other_core to halt Core 1, but Core 1
+    // doesn't enter idle and the whole system locks up. Symptom: pressing
+    // any menu item that toggles a config (notifications, region, preset,
+    // backlight, etc.) freezes the device. Until the SMP+flash sync is
+    // fixed, no-op all persistence on FreeWili. We lose flash persistence
+    // but the device stays responsive; main.cpp re-applies the critical
+    // RAM-only defaults (region=US, override_frequency) every boot.
+    (void)saveWhat;
+    return true;
+#endif
 
     // do not try to save anything if power level is not safe. In many cases flash will be lock-protected
     // and all writes will fail anyway. Device should be sleeping at this point anyway.
@@ -1854,8 +1878,12 @@ void NodeDB::addFromContact(meshtastic_SharedContact contact)
 
 /** Update user info and channel for this node based on received user data
  */
+volatile uint32_t g_updateUser_count __attribute__((used)) = 0;
+volatile uint32_t g_updateUser_changed __attribute__((used)) = 0;
+
 bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelIndex)
 {
+    g_updateUser_count++;
     meshtastic_NodeInfoLite *info = getOrCreateMeshNode(nodeId);
     if (!info) {
         return false;
@@ -1912,6 +1940,7 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
     info->has_user = true;
 
     if (changed) {
+        g_updateUser_changed++;
         updateGUIforNode = info;
         notifyObservers(true); // Force an update whether or not our node counts have changed
 

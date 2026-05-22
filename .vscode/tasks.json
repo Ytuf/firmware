@@ -5,11 +5,76 @@
       "type": "PlatformIO",
       "task": "Build",
       "problemMatcher": ["$platformio"],
+      "group": "build",
+      "label": "PlatformIO: Build (default env)"
+    },
+    {
+      "label": "PIO: Build freewili (release)",
+      "type": "shell",
+      "command": "pio",
+      "args": ["run", "-e", "freewili"],
+      "problemMatcher": ["$platformio"],
+      "group": "build"
+    },
+    {
+      "label": "PIO: Build fw-debug",
+      "type": "shell",
+      "command": "pio",
+      "args": ["run", "-e", "fw-debug"],
+      "problemMatcher": ["$platformio"],
       "group": {
         "kind": "build",
         "isDefault": true
+      }
+    },
+    {
+      // Meshtastic's build renames the ELF to firmware-<variant>-<ver>.<hash>.elf
+      // which changes every commit; copy the latest into a stable name that
+      // launch.json can reference.
+      "label": "Stage release ELF",
+      "dependsOrder": "sequence",
+      "dependsOn": ["PIO: Build freewili (release)"],
+      "type": "shell",
+      "windows": {
+        "command": "powershell",
+        "args": [
+          "-NoProfile",
+          "-Command",
+          "Copy-Item (Get-ChildItem .pio/build/freewili/firmware-freewili-*.elf | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName .pio/build/freewili/firmware-staged.elf -Force"
+        ]
       },
-      "label": "PlatformIO: Build"
+      "linux": {
+        "command": "bash",
+        "args": ["-c", "cp $(ls -t .pio/build/freewili/firmware-freewili-*.elf | head -1) .pio/build/freewili/firmware-staged.elf"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["-c", "cp $(ls -t .pio/build/freewili/firmware-freewili-*.elf | head -1) .pio/build/freewili/firmware-staged.elf"]
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Stage debug ELF",
+      "dependsOrder": "sequence",
+      "dependsOn": ["PIO: Build fw-debug"],
+      "type": "shell",
+      "windows": {
+        "command": "powershell",
+        "args": [
+          "-NoProfile",
+          "-Command",
+          "Copy-Item (Get-ChildItem .pio/build/fw-debug/firmware-fw-debug-*.elf | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName .pio/build/fw-debug/firmware-staged.elf -Force"
+        ]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["-c", "cp $(ls -t .pio/build/fw-debug/firmware-fw-debug-*.elf | head -1) .pio/build/fw-debug/firmware-staged.elf"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["-c", "cp $(ls -t .pio/build/fw-debug/firmware-fw-debug-*.elf | head -1) .pio/build/fw-debug/firmware-staged.elf"]
+      },
+      "problemMatcher": []
     }
   ]
 }

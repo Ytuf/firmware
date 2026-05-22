@@ -16,8 +16,15 @@
 #include <graphics/NomadStarLED.h>
 #endif
 
-#ifdef HAS_NEOPIXEL
+// FreeWili: the LED chain has an INVERTING buffer between MCU and chain DIN.
+// Adafruit_NeoPixel drives un-inverted via PIO, so its pixels.show() ends up
+// sending inverted data to the chain. The variant's own PIO-based driver in
+// variant.cpp handles inversion via GPIO_OVERRIDE_INVERT, so on FreeWili we
+// compile out the NeoPixel calls in this thread and let the variant drive
+// the chain exclusively.
+#if defined(HAS_NEOPIXEL) && !defined(FREEWILI)
 #include <Adafruit_NeoPixel.h>
+#define HAS_NEOPIXEL_MESHTASTIC 1
 #endif
 
 #ifdef UNPHONE
@@ -39,7 +46,7 @@ class AmbientLightingThread : public concurrency::OSThread
     LP5562 rgbw;
 #endif
 
-#ifdef HAS_NEOPIXEL
+#ifdef HAS_NEOPIXEL_MESHTASTIC
     Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NEOPIXEL_COUNT, NEOPIXEL_DATA, NEOPIXEL_TYPE);
 #endif
 
@@ -86,7 +93,7 @@ class AmbientLightingThread : public concurrency::OSThread
                 pinMode(RGBLED_GREEN, OUTPUT);
                 pinMode(RGBLED_BLUE, OUTPUT);
 #endif
-#ifdef HAS_NEOPIXEL
+#ifdef HAS_NEOPIXEL_MESHTASTIC
                 pixels.begin(); // Initialise the pixel(s)
                 pixels.clear(); // Set all pixel colors to 'off'
                 pixels.setBrightness(moduleConfig.ambient_lighting.current);
@@ -146,7 +153,7 @@ class AmbientLightingThread : public concurrency::OSThread
             rgbw.setWhite(0);
             LOG_INFO("OFF: LP5562 Ambient lighting");
 #endif
-#ifdef HAS_NEOPIXEL
+#ifdef HAS_NEOPIXEL_MESHTASTIC
             pixels.clear();
             pixels.show();
             LOG_INFO("OFF: NeoPixel Ambient lighting");
@@ -186,7 +193,7 @@ class AmbientLightingThread : public concurrency::OSThread
             rgbw.setBlue(blue);
             LOG_DEBUG("Init LP5562 Ambient light w/ current=%f, red=%d, green=%d, blue=%d", current, red, green, blue);
 #endif
-#ifdef HAS_NEOPIXEL
+#ifdef HAS_NEOPIXEL_MESHTASTIC
             pixels.fill(pixels.Color(red, green, blue), 0, NEOPIXEL_COUNT);
 
 // RadioMaster Bandit has addressable LED at the two buttons

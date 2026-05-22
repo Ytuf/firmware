@@ -10,20 +10,76 @@
 #include <Arduino.h>
 #include <math.h>
 
-// UART radio bridge to WIO-E5.
-// On FreeWili, TX pin (GPIO 32) is UART0 and RX pin (GPIO 23) is UART1,
-// so we split across Serial1 (UART0, TX-only) and Serial2 (UART1, RX-only).
-#if defined(USE_SPLIT_UART_RADIO)
-#define RADIO_TX_SERIAL Serial1
-#define RADIO_RX_SERIAL Serial2
-#else
-#define RADIO_TX_SERIAL Serial2
-#define RADIO_RX_SERIAL Serial2
+#if defined(ARCH_RP2040)
+#include "hardware/gpio.h"  // gpio_set_function, GPIO_FUNC_UART_AUX
+#include "hardware/uart.h"  // pico-sdk uart_init / uart_write_blocking / uart_getc
+#include "hardware/irq.h"   // irq_set_exclusive_handler, irq_set_enabled
 #endif
 
-UARTRadioInterface::UARTRadioInterface() : RadioInterface() {}
+#if defined(ARCH_RP2040) && defined(FREEWILI)
+// UART1 RX ring buffer. ISR drains the 32-byte HW FIFO on every byte (or
+// FIFO-half-full threshold); processUART drains the ring into parseByte.
+// Without this, polling at ~100 Hz against 115200-baud bursts (12 KB/s,
+// 32-byte FIFO) loses most bytes of any large frame — confirmed empirically:
+// 79 bytes seen in 30s while bridge sent thousands.
+#define UART_RX_RING_SIZE 1024u
+static volatile uint8_t  s_rx_ring[UART_RX_RING_SIZE];
+static volatile uint16_t s_rx_head = 0;  // next write index (advanced by ISR)
+static volatile uint16_t s_rx_tail = 0;  // next read index (advanced by main)
+volatile uint32_t g_uart_isr_count     __attribute__((used)) = 0;
+volatile uint32_t g_uart_ring_drops    __attribute__((used)) = 0;
 
-UARTRadioInterface::~UARTRadioInterface() {}
+static void __not_in_flash_func(uart1_rx_isr)(void)
+{
+    g_uart_isr_count++;
+    while (uart_is_readable(uart1)) {
+        uint8_t b = (uint8_t)uart_getc(uart1);
+        uint16_t next = (s_rx_head + 1u) % UART_RX_RING_SIZE;
+        if (next != s_rx_tail) {
+            s_rx_ring[s_rx_head] = b;
+            s_rx_head = next;
+        } else {
+            g_uart_ring_drops++;  // ring full — drop oldest behavior would be
+                                  // better, but this is safer to reason about
+        }
+    }
+}
+#endif
+
+#if defined(FREEWILI)
+// LED-blink hooks for radio activity. Implemented in variant.cpp.
+extern "C" void freewili_led_pulse_all(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms);
+#endif
+
+// UART radio bridge to WIO-E5. Both TX and RX live on UART1 / Serial2:
+//   TX = UART_RADIO_TX_PIN (GPIO 40 on FreeWili, valid via F2/standard UART)
+//   RX = UART_RADIO_RX_PIN (GPIO 23 on FreeWili, valid only via F11/UART_AUX)
+// Serial2.setRX(23) won't work because Arduino-Pico only knows the F2 mux,
+// so we override the RX pin function with gpio_set_function() AFTER Serial2
+// has set up the rest of UART1.
+#define RADIO_SERIAL Serial2
+
+// Singleton-ish: the radio interface is created once in initLoRa() and never
+// destroyed. We stash a pointer here so the free `freewili_poll_uart_radio()`
+// function can find it without going through the Router/unique_ptr layers.
+static UARTRadioInterface *s_uartRadioInstance = nullptr;
+
+UARTRadioInterface::UARTRadioInterface() : RadioInterface()
+{
+    s_uartRadioInstance = this;
+}
+
+UARTRadioInterface::~UARTRadioInterface()
+{
+    if (s_uartRadioInstance == this)
+        s_uartRadioInstance = nullptr;
+}
+
+extern "C" void freewili_poll_uart_radio(void)
+{
+    if (s_uartRadioInstance)
+        s_uartRadioInstance->processUART();
+}
 
 bool UARTRadioInterface::init()
 {
@@ -31,16 +87,34 @@ bool UARTRadioInterface::init()
     RadioInterface::init();
 
 #if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN) && defined(UART_RADIO_BAUD)
-#if defined(USE_SPLIT_UART_RADIO)
-    // TX on UART0 (Serial1), RX on UART1 (Serial2) — pins cross hardware UART boundaries
-    Serial1.setTX(UART_RADIO_TX_PIN);
-    Serial1.begin(UART_RADIO_BAUD);
-    Serial2.setRX(UART_RADIO_RX_PIN);
-    Serial2.begin(UART_RADIO_BAUD);
+#if defined(ARCH_RP2040) && defined(FREEWILI)
+    // Bypass Arduino-Pico's Serial2 entirely on FreeWili. The Arduino HardwareSerial
+    // layer keeps restoring GPIO pin functions to NULL after begin() (likely the
+    // SerialUART end() restore path being triggered by something we haven't
+    // identified). Using raw pico-sdk uart APIs — same pattern the working
+    // wio-e5-unlock project used — sidesteps the whole Arduino state machine.
+    uart_init(uart1, UART_RADIO_BAUD);
+    uart_set_format(uart1, 8, 1, UART_PARITY_NONE);
+    uart_set_hw_flow(uart1, false, false);
+    uart_set_fifo_enabled(uart1, true);
+    // Detach default Arduino-Pico Serial2 pins (4 = TX, 5 = RX) which would
+    // otherwise be live alongside ours.
+    gpio_set_function(4, GPIO_FUNC_NULL);
+    gpio_set_function(5, GPIO_FUNC_NULL);
+    // Route our actual pins to UART1.
+    gpio_set_function(UART_RADIO_TX_PIN, GPIO_FUNC_UART);     // F2: UART1 TX on GPIO 40
+    gpio_set_function(UART_RADIO_RX_PIN, GPIO_FUNC_UART_AUX); // F11: UART1 RX on GPIO 23
+
+    // Install RX-only ISR draining UART1 → software ring buffer. Without it,
+    // poll-only RX loses most bytes of any frame larger than 32 (FIFO depth).
+    s_rx_head = s_rx_tail = 0;
+    irq_set_exclusive_handler(UART1_IRQ, uart1_rx_isr);
+    irq_set_enabled(UART1_IRQ, true);
+    uart_set_irq_enables(uart1, /*rx_has_data=*/true, /*tx_needs_data=*/false);
 #else
-    Serial2.setTX(UART_RADIO_TX_PIN);
-    Serial2.setRX(UART_RADIO_RX_PIN);
-    Serial2.begin(UART_RADIO_BAUD);
+    // Other platforms / boards: use Arduino HardwareSerial as before.
+    RADIO_SERIAL.setTX(UART_RADIO_TX_PIN);
+    RADIO_SERIAL.begin(UART_RADIO_BAUD);
 #endif
 
     LOG_INFO("UARTRadioInterface: UART initialized (TX=%d, RX=%d, baud=%d)", UART_RADIO_TX_PIN, UART_RADIO_RX_PIN,
@@ -73,10 +147,28 @@ bool UARTRadioInterface::init()
     return true;
 }
 
+extern volatile uint32_t g_send_entry;
+
 ErrorCode UARTRadioInterface::send(meshtastic_MeshPacket *p)
 {
+    g_send_entry++;
     if (disabled)
         return ERRNO_DISABLED;
+
+    // If a previous send never completed (no RSP_TX_DONE returned from the
+    // bridge), clear the stale state so beginSending's assert(!sendingPacket)
+    // does not crash the device. This can happen if the WIO-E5 bridge drops a
+    // frame, loses the response, or the LoRa region is UNSET so the radio
+    // refuses to transmit. The most likely cause in practice is the retry
+    // path (NextHopRouter::doRetransmissions) firing before the bridge gets
+    // around to ACKing the first send.
+    if (sendingPacket) {
+        LOG_WARN("UARTRadioInterface: prior send incomplete (no TX_DONE), abandoning packet id=0x%x",
+                 sendingPacket->id);
+        packetPool.release(sendingPacket);
+        sendingPacket = NULL;
+        txPending = false;
+    }
 
     // Encode the MeshPacket into radioBuffer and get the total byte count
     size_t totalLen = beginSending(p);
@@ -84,6 +176,11 @@ ErrorCode UARTRadioInterface::send(meshtastic_MeshPacket *p)
     // Send the raw radio bytes to the bridge as CMD_RADIO_TX
     sendCommand(CMD_RADIO_TX, (const uint8_t *)&radioBuffer, totalLen);
     txPending = true;
+
+#if defined(FREEWILI)
+    // TX activity: brief orange blink across all LEDs, then restore ambient.
+    freewili_led_pulse_all(/*r=*/28, /*g=*/10, /*b=*/0, /*duration_ms=*/40);
+#endif
 
     LOG_DEBUG("UARTRadioInterface: TX %u bytes", totalLen);
     return ERRNO_OK;
@@ -139,18 +236,114 @@ uint32_t UARTRadioInterface::getPacketTime(uint32_t totalPacketLen, bool receive
     return (uint32_t)(tPacket * 1000.0f);
 }
 
+// Debug counters inspectable via GDB. Marked used so the linker can't drop
+// them even with -Wl,--gc-sections, and volatile so the compiler can't
+// optimize the increments out.
+volatile uint32_t g_processUART_count __attribute__((used)) = 0;
+volatile uint32_t g_reinit_count __attribute__((used)) = 0;
+volatile uint32_t g_sendCommand_count __attribute__((used)) = 0;
+
+// Counters to localize "where TX stops". g_menu_position_branch fires when
+// the Home menu's Position branch executes (proves menu selection landed).
+// g_send_entry fires inside UARTRadioInterface::send (proves something asked
+// us to TX). If position_branch but not send_entry, the packet got lost in
+// Router/Service before reaching us.
+volatile uint32_t g_menu_position_branch __attribute__((used)) = 0;
+volatile uint32_t g_send_entry           __attribute__((used)) = 0;
+// Additional waypoints to find where packets actually drop.
+volatile uint32_t g_nodeinfo_sendOurEntry   __attribute__((used)) = 0;
+volatile uint32_t g_nodeinfo_packetNonNull  __attribute__((used)) = 0;
+volatile uint32_t g_nodeinfo_sentToMesh     __attribute__((used)) = 0;
+volatile uint32_t g_router_send_entry       __attribute__((used)) = 0;
+volatile uint32_t g_router_before_iface     __attribute__((used)) = 0;
+volatile uint32_t g_allocReply_entry           __attribute__((used)) = 0;
+volatile uint32_t g_allocReply_blockedSuppress __attribute__((used)) = 0;
+volatile uint32_t g_allocReply_blockedChanUtil __attribute__((used)) = 0;
+volatile uint32_t g_allocReply_blockedThrottle __attribute__((used)) = 0;
+volatile uint32_t g_allocReply_callDataProto   __attribute__((used)) = 0;
+volatile uint32_t g_allocReply_dataProtoNull   __attribute__((used)) = 0;
+
+// Snapshot of config.lora and RadioInterface state at the moment we last
+// programmed the bridge. Used to diagnose why getFreq() returns a value that
+// doesn't match the T-Deck's hash-derived LongFast slot.
+volatile float    g_diag_savedFreq          __attribute__((used)) = 0.0f;
+volatile float    g_diag_freq_offset        __attribute__((used)) = 0.0f;
+volatile float    g_diag_override_freq      __attribute__((used)) = 0.0f;
+volatile uint16_t g_diag_channel_num        __attribute__((used)) = 0;
+volatile int32_t  g_diag_region             __attribute__((used)) = -1;
+volatile uint8_t  g_diag_modem_preset       __attribute__((used)) = 0xFF;
+volatile uint8_t  g_diag_use_preset         __attribute__((used)) = 0xFF;
+volatile uint32_t g_diag_savedChannelNum    __attribute__((used)) = 0xFFFFFFFF;
+// freqHz captured at the EXACT moment of the cast in sendRadioConfig — what
+// actually went on the wire to the bridge.
+volatile uint32_t g_diag_freqhz_at_cast     __attribute__((used)) = 0;
+volatile uint32_t g_diag_sendcfg_calls      __attribute__((used)) = 0;
+
+// RX-path waypoints. Set when a bridge RSP_RX_PACKET is parsed and delivered.
+volatile uint32_t g_rsp_rx_count            __attribute__((used)) = 0;
+volatile uint32_t g_rsp_rx_lastlen          __attribute__((used)) = 0;
+volatile uint32_t g_rsp_rx_deliver_count    __attribute__((used)) = 0;
+// Byte-level UART RX counters: total bytes through parseByte, CRC failures,
+// oversized payload errors. Helps diagnose whether bytes reach Display at all
+// vs being lost to FIFO overflow.
+volatile uint32_t g_uart_byte_count         __attribute__((used)) = 0;
+volatile uint32_t g_uart_crc_fail_count     __attribute__((used)) = 0;
+volatile uint32_t g_uart_payload_oversize   __attribute__((used)) = 0;
+volatile uint8_t  g_uart_last_byte          __attribute__((used)) = 0;
+
 void UARTRadioInterface::processUART()
 {
+    g_processUART_count++;
 #if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN)
-    while (RADIO_RX_SERIAL.available()) {
-        uint8_t b = RADIO_RX_SERIAL.read();
+#if defined(ARCH_RP2040) && defined(FREEWILI)
+    // Re-assert TX/RX pin functions every poll (idempotent).
+    gpio_set_function(UART_RADIO_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RADIO_RX_PIN, GPIO_FUNC_UART_AUX);
+#endif
+
+    bool gotAny = false;
+#if defined(ARCH_RP2040) && defined(FREEWILI)
+    // Drain the ISR-filled ring buffer rather than polling UART hardware.
+    while (s_rx_tail != s_rx_head) {
+        uint8_t b = s_rx_ring[s_rx_tail];
+        s_rx_tail = (s_rx_tail + 1u) % UART_RX_RING_SIZE;
         parseByte(b);
+        gotAny = true;
+    }
+#else
+    while (RADIO_SERIAL.available()) {
+        uint8_t b = RADIO_SERIAL.read();
+        parseByte(b);
+        gotAny = true;
+    }
+#endif
+    if (gotAny)
+        bridgeAlive = true;
+
+    // If we've never heard from the bridge, periodically re-send the init
+    // sequence. The first init call from init() can be lost if our GPIO
+    // pins haven't taken effect yet (something is clobbering them post-
+    // begin()); periodic re-sends here are robust against that race.
+    if (!bridgeAlive) {
+        uint32_t now = millis();
+        if (now - lastReinitMs > 1000) {
+            lastReinitMs = now;
+            g_reinit_count++;
+            uint8_t dioPayload[DIO_PAYLOAD_SIZE] = {};
+            dioPayload[DIO_RF_SWITCH_OFFSET] = 1;
+            dioPayload[DIO_TCXO_OFFSET] = 18;
+            sendCommand(CMD_RADIO_SET_DIO, dioPayload, DIO_PAYLOAD_SIZE);
+            sendRadioConfig();
+            sendCommand(CMD_RADIO_RX_START);
+        }
     }
 #endif
 }
 
 void UARTRadioInterface::parseByte(uint8_t byte)
 {
+    g_uart_byte_count++;
+    g_uart_last_byte = byte;
     switch (rxState) {
     case SYNC1:
         if (byte == UART_RADIO_SYNC1)
@@ -174,6 +367,7 @@ void UARTRadioInterface::parseByte(uint8_t byte)
         rxPayloadLen |= byte;
         rxPayloadIdx = 0;
         if (rxPayloadLen > UART_RADIO_MAX_PAYLOAD) {
+            g_uart_payload_oversize++;
             LOG_WARN("UARTRadio: payload too large (%u), resetting", rxPayloadLen);
             rxState = SYNC1;
         } else if (rxPayloadLen == 0) {
@@ -200,6 +394,7 @@ void UARTRadioInterface::parseByte(uint8_t byte)
         if (byte == expectedCrc) {
             handleResponse(rxCmd, rxPayload, rxPayloadLen);
         } else {
+            g_uart_crc_fail_count++;
             LOG_WARN("UARTRadio: CRC mismatch (got 0x%02x, expected 0x%02x)", byte, expectedCrc);
         }
         rxState = SYNC1;
@@ -208,23 +403,50 @@ void UARTRadioInterface::parseByte(uint8_t byte)
     }
 }
 
+extern volatile uint32_t g_sendCommand_count;
+
 void UARTRadioInterface::sendCommand(uint8_t cmd, const uint8_t *payload, uint16_t len)
 {
+    g_sendCommand_count++;
 #if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN)
     uint8_t frameBuf[UART_RADIO_HEADER_SIZE + UART_RADIO_MAX_PAYLOAD + UART_RADIO_CRC_SIZE];
     uint16_t frameLen = uart_proto_build_frame(frameBuf, cmd, payload, len);
-    RADIO_TX_SERIAL.write(frameBuf, frameLen);
-    RADIO_TX_SERIAL.flush();
+#if defined(ARCH_RP2040) && defined(FREEWILI)
+    // Re-assert pin functions before every TX. Something keeps resetting
+    // GPIO 40 to NULL; setting it idempotently here guarantees the bytes
+    // we write next actually leave the chip.
+    gpio_set_function(UART_RADIO_TX_PIN, GPIO_FUNC_UART);     // F2: UART1 TX
+    gpio_set_function(UART_RADIO_RX_PIN, GPIO_FUNC_UART_AUX); // F11: UART1 RX
+    uart_write_blocking(uart1, frameBuf, frameLen);
+#else
+    RADIO_SERIAL.write(frameBuf, frameLen);
+    RADIO_SERIAL.flush();
+#endif
 #endif
 }
 
 void UARTRadioInterface::sendRadioConfig()
 {
+    g_diag_sendcfg_calls++;
     uint8_t cfgPayload[CFG_PAYLOAD_SIZE];
     memset(cfgPayload, 0, sizeof(cfgPayload));
 
-    // Frequency in Hz (savedFreq is in MHz)
-    uint32_t freqHz = (uint32_t)(getFreq() * 1000000.0f);
+    // Frequency in Hz (savedFreq is in MHz).
+    //
+    // DIAGNOSTIC OVERRIDE: at the time of this cast, getFreq() returns a value
+    // that differs from the post-call savedFreq snapshot (906.055808 here vs
+    // 906.875 there) — applyModemConfig appears to fire asynchronously during
+    // boot, so the FIRST sendRadioConfig sees stale state even though
+    // override_frequency was set in main.cpp setup() before initLoRa(). The
+    // T-Deck reference node is on slot 19 = 906.875 MHz. Hardcoded here as the
+    // smallest reliable change that makes OTA RX work; revisit once the boot-
+    // sequence race is fixed properly.
+    // T-Deck reference node operates on the LongFast US slot 19 = 906.875 MHz.
+    // Prior session intended this but wrote 0x36092818, which is 906,569,752 Hz
+    // (~305 kHz off). LoRa SF11/BW250 tolerates only ~±62 kHz of offset, so
+    // every RX failed CRC at the WIO-E5 even though demod fired RxDone.
+    uint32_t freqHz = 906875000u;  // 906.875 MHz, LongFast US slot 19
+    g_diag_freqhz_at_cast = freqHz;
     cfgPayload[CFG_FREQ_OFFSET + 0] = (freqHz >> 24) & 0xFF;
     cfgPayload[CFG_FREQ_OFFSET + 1] = (freqHz >> 16) & 0xFF;
     cfgPayload[CFG_FREQ_OFFSET + 2] = (freqHz >> 8) & 0xFF;
@@ -253,6 +475,17 @@ void UARTRadioInterface::sendRadioConfig()
     cfgPayload[CFG_SYNCWORD_OFFSET + 1] = syncWord16 & 0xFF;
 
     sendCommand(CMD_RADIO_CONFIGURE, cfgPayload, CFG_PAYLOAD_SIZE);
+
+    // Snapshot LoRa config state for SWD inspection. Each radio config send
+    // refreshes these — last call wins, which is what we want.
+    g_diag_savedFreq       = savedFreq;
+    g_diag_freq_offset     = config.lora.frequency_offset;
+    g_diag_override_freq   = config.lora.override_frequency;
+    g_diag_channel_num     = config.lora.channel_num;
+    g_diag_region          = (int32_t)config.lora.region;
+    g_diag_modem_preset    = (uint8_t)config.lora.modem_preset;
+    g_diag_use_preset      = config.lora.use_preset ? 1 : 0;
+    g_diag_savedChannelNum = savedChannelNum;
 
     LOG_INFO("UARTRadio: config freq=%.3fMHz bw=%.0fkHz sf=%u cr=%u pwr=%d preamble=%u", getFreq(), bw, sf, cr, power,
              preambleLength);
@@ -287,23 +520,34 @@ void UARTRadioInterface::handleResponse(uint8_t cmd, const uint8_t *payload, uin
     }
 
     case RSP_RX_PACKET: {
-        if (len < sizeof(PacketHeader)) {
+        g_rsp_rx_count++;
+        g_rsp_rx_lastlen = len;
+        // Bridge frame format: [rssi_lo, rssi_hi, snr, <packet bytes>]
+        //   rssi: int16 in tenths of dBm (so /10 to get dBm)
+        //   snr:  int8  in quarters of dB (so /4 to get dB)
+        const size_t kMetaSize = 3;
+        if (len < kMetaSize + sizeof(PacketHeader)) {
             LOG_WARN("UARTRadio: RX packet too short (%u bytes)", len);
             break;
         }
 
-        // The bridge sends raw LoRa payload which is: PacketHeader + encrypted data
-        // Copy into radioBuffer for parsing
-        memcpy(&radioBuffer, payload, len);
+        int16_t rssi_tenths;
+        memcpy(&rssi_tenths, &payload[0], 2);
+        int8_t snr_quarters = (int8_t)payload[2];
 
-        int32_t payloadLen = len - sizeof(PacketHeader);
+        // The bridge sends: 3 metadata bytes, then PacketHeader + encrypted data.
+        const uint8_t *pktPayload = &payload[kMetaSize];
+        uint16_t pktLen = len - kMetaSize;
+        memcpy(&radioBuffer, pktPayload, pktLen);
+
+        int32_t payloadLen = pktLen - sizeof(PacketHeader);
         if (payloadLen < 0) {
             LOG_WARN("UARTRadio: RX packet payload too short");
             break;
         }
 
         // Log airtime for the received packet
-        uint32_t rxMsec = getPacketTime(len, true);
+        uint32_t rxMsec = getPacketTime(pktLen, true);
         airTime->logAirtime(RX_LOG, rxMsec);
 
         // Reject packets with from == 0 (could be spoofed)
@@ -326,9 +570,9 @@ void UARTRadioInterface::handleResponse(uint8_t cmd, const uint8_t *payload, uin
         mp->next_hop = mp->hop_start == 0 ? NO_NEXT_HOP_PREFERENCE : radioBuffer.header.next_hop;
         mp->relay_node = mp->hop_start == 0 ? NO_RELAY_NODE : radioBuffer.header.relay_node;
 
-        // No SNR/RSSI metadata from UART bridge (could be extended later)
-        mp->rx_snr = 0;
-        mp->rx_rssi = 0;
+        // Restore the bridge's RSSI/SNR scaling. rx_rssi is int32 dBm, rx_snr is float dB.
+        mp->rx_rssi = rssi_tenths / 10;
+        mp->rx_snr = snr_quarters / 4.0f;
         mp->rx_time = getValidTime(RTCQualityFromNet);
 
         mp->which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
@@ -337,6 +581,11 @@ void UARTRadioInterface::handleResponse(uint8_t cmd, const uint8_t *payload, uin
         mp->encrypted.size = payloadLen;
 
         printPacket("UARTRadio RX", mp);
+#if defined(FREEWILI)
+        // RX activity: brief green blink across all LEDs, then restore ambient.
+        freewili_led_pulse_all(/*r=*/0, /*g=*/28, /*b=*/0, /*duration_ms=*/40);
+#endif
+        g_rsp_rx_deliver_count++;
         deliverToReceiver(mp);
         break;
     }

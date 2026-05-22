@@ -87,6 +87,10 @@ void NodeInfoModule::alterReceivedProtobuf(meshtastic_MeshPacket &mp, meshtastic
 
 void NodeInfoModule::sendOurNodeInfo(NodeNum dest, bool wantReplies, uint8_t channel, bool _shorterTimeout)
 {
+    extern volatile uint32_t g_nodeinfo_sendOurEntry;
+    extern volatile uint32_t g_nodeinfo_packetNonNull;
+    extern volatile uint32_t g_nodeinfo_sentToMesh;
+    g_nodeinfo_sendOurEntry++;
     // cancel any not yet sent (now stale) position packets
     if (prevPacketId) // if we wrap around to zero, we'll simply fail to cancel in that rare case (no big deal)
         service->cancelSending(prevPacketId);
@@ -96,6 +100,7 @@ void NodeInfoModule::sendOurNodeInfo(NodeNum dest, bool wantReplies, uint8_t cha
     DEBUG_HEAP_AFTER("NodeInfoModule::sendOurNodeInfo", p);
 
     if (p) { // Check whether we didn't ignore it
+        g_nodeinfo_packetNonNull++;
         p->to = dest;
         bool requestWantResponse = (config.device.role != meshtastic_Config_DeviceConfig_Role_TRACKER &&
                                     config.device.role != meshtastic_Config_DeviceConfig_Role_SENSOR) &&
@@ -113,6 +118,7 @@ void NodeInfoModule::sendOurNodeInfo(NodeNum dest, bool wantReplies, uint8_t cha
 
         prevPacketId = p->id;
 
+        g_nodeinfo_sentToMesh++;
         service->sendToMesh(p);
         shorterTimeout = false;
     }
@@ -126,6 +132,13 @@ void NodeInfoModule::triggerImmediateNodeInfoCheck()
 
 meshtastic_MeshPacket *NodeInfoModule::allocReply()
 {
+    extern volatile uint32_t g_allocReply_entry;
+    extern volatile uint32_t g_allocReply_blockedSuppress;
+    extern volatile uint32_t g_allocReply_blockedChanUtil;
+    extern volatile uint32_t g_allocReply_blockedThrottle;
+    extern volatile uint32_t g_allocReply_callDataProto;
+    extern volatile uint32_t g_allocReply_dataProtoNull;
+    g_allocReply_entry++;
     // Only apply suppression when actually replying to someone else's request, not for periodic broadcasts.
     const bool isReplyingToExternalRequest = currentRequest &&
                                              currentRequest->which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
@@ -136,28 +149,37 @@ meshtastic_MeshPacket *NodeInfoModule::allocReply()
         LOG_DEBUG("Skip send NodeInfo since we heard the requester <12h ago");
         ignoreRequest = true;
         suppressReplyForCurrentRequest = false;
+        g_allocReply_blockedSuppress++;
         return NULL;
     }
 
+#if !defined(FREEWILI)
     if (!airTime->isTxAllowedChannelUtil(false)) {
         ignoreRequest = true; // Mark it as ignored for MeshModule
         LOG_DEBUG("Skip send NodeInfo > 40%% ch. util");
+        g_allocReply_blockedChanUtil++;
         return NULL;
     }
+#endif
 
     // Use graduated scaling based on active mesh size (10 minute base, scales with congestion coefficient)
     uint32_t timeoutMs = Default::getConfiguredOrDefaultMsScaled(0, 10 * 60, nodeStatus->getNumOnline());
     uint32_t lastNodeInfo = transmitHistory ? transmitHistory->getLastSentToMeshMillis(meshtastic_PortNum_NODEINFO_APP) : 0;
+#if !defined(FREEWILI)
     if (!shorterTimeout && lastNodeInfo && Throttle::isWithinTimespanMs(lastNodeInfo, timeoutMs)) {
         LOG_DEBUG("Skip send NodeInfo since we sent it <%us ago", timeoutMs / 1000);
         ignoreRequest = true; // Mark it as ignored for MeshModule
+        g_allocReply_blockedThrottle++;
         return NULL;
     } else if (shorterTimeout && lastNodeInfo && Throttle::isWithinTimespanMs(lastNodeInfo, 60 * 1000)) {
         // For interactive/urgent requests (e.g., user-triggered or implicit requests), use a shorter 60s timeout
         LOG_DEBUG("Skip send NodeInfo since we sent it <60s ago");
         ignoreRequest = true;
+        g_allocReply_blockedThrottle++;
         return NULL;
-    } else {
+    } else
+#endif
+    {
         ignoreRequest = false; // Don't ignore requests anymore
         meshtastic_User &u = owner;
 
@@ -176,7 +198,10 @@ meshtastic_MeshPacket *NodeInfoModule::allocReply()
         LOG_INFO("Send owner %s/%s/%s", u.id, u.long_name, u.short_name);
         if (transmitHistory)
             transmitHistory->setLastSentToMesh(meshtastic_PortNum_NODEINFO_APP);
-        return allocDataProtobuf(u);
+        g_allocReply_callDataProto++;
+        meshtastic_MeshPacket *_p = allocDataProtobuf(u);
+        if (!_p) g_allocReply_dataProtoNull++;
+        return _p;
     }
 }
 

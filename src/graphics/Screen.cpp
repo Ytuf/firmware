@@ -1078,7 +1078,9 @@ void Screen::setFrames(FrameFocus focus)
     normalFrames[numframes++] = graphics::MessageRenderer::drawTextMessageFrame;
     indicatorIcons.push_back(icon_mail);
 
-#ifndef USE_EINK
+// FreeWili gets individual per-mode frames instead of the rotating combined
+// ones, so user can navigate directly to (and stay on) the view they want.
+#if !defined(USE_EINK) && !defined(FREEWILI)
     if (!hiddenFrames.nodelist_nodes) {
         fsi.positions.nodelist_nodes = numframes;
         normalFrames[numframes++] = graphics::NodeListRenderer::drawDynamicListScreen_Nodes;
@@ -1091,8 +1093,8 @@ void Screen::setFrames(FrameFocus focus)
     }
 #endif
 
-// Show detailed node views only on E-Ink builds
-#ifdef USE_EINK
+// Show detailed per-mode views on E-Ink AND FreeWili builds.
+#if defined(USE_EINK) || defined(FREEWILI)
     if (!hiddenFrames.nodelist_lastheard) {
         fsi.positions.nodelist_lastheard = numframes;
         normalFrames[numframes++] = graphics::NodeListRenderer::drawLastHeardScreen;
@@ -1277,7 +1279,7 @@ void Screen::setFrameImmediateDraw(FrameCallback *drawFrames)
 
 void Screen::toggleFrameVisibility(const std::string &frameName)
 {
-#ifndef USE_EINK
+#if !defined(USE_EINK) && !defined(FREEWILI)
     if (frameName == "nodelist_nodes") {
         hiddenFrames.nodelist_nodes = !hiddenFrames.nodelist_nodes;
     }
@@ -1285,7 +1287,7 @@ void Screen::toggleFrameVisibility(const std::string &frameName)
         hiddenFrames.nodelist_location = !hiddenFrames.nodelist_location;
     }
 #endif
-#ifdef USE_EINK
+#if defined(USE_EINK) || defined(FREEWILI)
     if (frameName == "nodelist_lastheard") {
         hiddenFrames.nodelist_lastheard = !hiddenFrames.nodelist_lastheard;
     }
@@ -1322,13 +1324,13 @@ void Screen::toggleFrameVisibility(const std::string &frameName)
 
 bool Screen::isFrameHidden(const std::string &frameName) const
 {
-#ifndef USE_EINK
+#if !defined(USE_EINK) && !defined(FREEWILI)
     if (frameName == "nodelist_nodes")
         return hiddenFrames.nodelist_nodes;
     if (frameName == "nodelist_location")
         return hiddenFrames.nodelist_location;
 #endif
-#ifdef USE_EINK
+#if defined(USE_EINK) || defined(FREEWILI)
     if (frameName == "nodelist_lastheard")
         return hiddenFrames.nodelist_lastheard;
     if (frameName == "nodelist_hopsignal")
@@ -1642,8 +1644,37 @@ int Screen::handleUIFrameEvent(const UIFrameEvent *event)
     return 0;
 }
 
+// SWD-inspectable counters for input event diagnosis. Updated unconditionally
+// before any early-return so we can see what events Screen actually receives.
+volatile uint32_t g_input_total       __attribute__((used)) = 0;
+volatile uint32_t g_input_select      __attribute__((used)) = 0;
+volatile uint32_t g_input_left        __attribute__((used)) = 0;
+volatile uint32_t g_input_right       __attribute__((used)) = 0;
+volatile uint32_t g_input_up          __attribute__((used)) = 0;
+volatile uint32_t g_input_down        __attribute__((used)) = 0;
+volatile uint32_t g_input_back        __attribute__((used)) = 0;
+volatile uint32_t g_input_user_press  __attribute__((used)) = 0;
+volatile uint32_t g_input_alt_press   __attribute__((used)) = 0;
+volatile uint32_t g_input_other       __attribute__((used)) = 0;
+volatile uint8_t  g_input_last_event  __attribute__((used)) = 0;
+volatile uint8_t  g_input_last_frame  __attribute__((used)) = 0xFF;
+
 int Screen::handleInputEvent(const InputEvent *event)
 {
+    g_input_total++;
+    g_input_last_event = (uint8_t)event->inputEvent;
+    g_input_last_frame = (uint8_t)ui->getUiState()->currentFrame;
+    switch (event->inputEvent) {
+        case INPUT_BROKER_SELECT:     g_input_select++; break;
+        case INPUT_BROKER_LEFT:       g_input_left++; break;
+        case INPUT_BROKER_RIGHT:      g_input_right++; break;
+        case INPUT_BROKER_UP:         g_input_up++; break;
+        case INPUT_BROKER_DOWN:       g_input_down++; break;
+        case INPUT_BROKER_BACK:       g_input_back++; break;
+        case INPUT_BROKER_USER_PRESS: g_input_user_press++; break;
+        case INPUT_BROKER_ALT_PRESS:  g_input_alt_press++; break;
+        default:                      g_input_other++; break;
+    }
     LOG_INPUT("Screen Input event %u! kb %u", event->inputEvent, event->kbchar);
     if (!screenOn)
         return 0;
@@ -1779,9 +1810,14 @@ int Screen::handleInputEvent(const InputEvent *event)
             } else if (event->inputEvent == INPUT_BROKER_DOWN_LONG) {
                 // Long press down button for fast frame switching
                 showNextFrame();
+#if !defined(FREEWILI)
+            // FreeWili: stop auto-opening the preset-message picker on Up/Down
+            // while at the home frame — user found it unexpected. On other
+            // boards this fast-path remains.
             } else if ((event->inputEvent == INPUT_BROKER_UP || event->inputEvent == INPUT_BROKER_DOWN) &&
                        this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
                 cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
+#endif
             } else if (event->inputEvent == INPUT_BROKER_SELECT) {
                 if (this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
                     menuHandler::homeBaseMenu();

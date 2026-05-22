@@ -1,4 +1,10 @@
 #include "configuration.h"
+#if defined(FREEWILI)
+extern "C" void freewili_set_tz(const char *tz);
+#endif
+
+// Diagnostic counter defined in UARTRadioInterface.cpp at global scope.
+extern volatile uint32_t g_menu_position_branch;
 #if HAS_SCREEN
 #include "ClockRenderer.h"
 #include "Default.h"
@@ -8,6 +14,7 @@
 #include "MeshService.h"
 #include "MessageStore.h"
 #include "NodeDB.h"
+#include "mesh/Channels.h"
 #include "buzz.h"
 #include "graphics/Screen.h"
 #include "graphics/SharedUIDisplay.h"
@@ -23,6 +30,7 @@
 #include "modules/CannedMessageModule.h"
 #include "modules/ExternalNotificationModule.h"
 #include "modules/KeyVerificationModule.h"
+#include "modules/NodeInfoModule.h"
 #include "modules/TraceRouteModule.h"
 #include <algorithm>
 #include <array>
@@ -62,6 +70,9 @@ BannerOverlayOptions createStaticBannerOptions(const char *message, const MenuOp
 
 menuHandler::screenMenus menuHandler::menuQueue = MenuNone;
 uint32_t menuHandler::pickedNodeNum = 0;
+int menuHandler::editingChannelIndex = -1;
+uint32_t menuHandler::pendingFreetextDest = NODENUM_BROADCAST;
+uint8_t  menuHandler::pendingFreetextChannel = 0;
 bool test_enabled = false;
 uint8_t test_count = 0;
 
@@ -471,7 +482,15 @@ void menuHandler::TZPicker()
             strncpy(config.device.tzdef, option.value, sizeof(config.device.tzdef));
             config.device.tzdef[sizeof(config.device.tzdef) - 1] = '\0';
 
+#if defined(FREEWILI)
+            // setenv() hardfaults on this RP2350 + Arduino-Pico newlib build
+            // (see variant.cpp for details). freewili_set_tz() writes the new
+            // TZ into a pre-allocated environ slot and calls tzset(), which
+            // is what setenv("TZ", ...) effectively does on a working stack.
+            freewili_set_tz(config.device.tzdef);
+#else
             setenv("TZ", config.device.tzdef, 1);
+#endif
             service->reloadConfig(SEGMENT_CONFIG);
         });
 
@@ -674,24 +693,26 @@ void menuHandler::replyMenu()
             return;
         }
 
-        // Freetext reply
+        // Freetext reply: defer through FreetextLaunchMenu so the popup keyboard
+        // sets up cleanly outside the banner-callback frame.
         if (selected == ReplyFreetext) {
-
             if (mode == graphics::MessageRenderer::ThreadMode::CHANNEL) {
-                cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST, ch);
-
+                menuHandler::pendingFreetextDest = NODENUM_BROADCAST;
+                menuHandler::pendingFreetextChannel = ch;
             } else if (mode == graphics::MessageRenderer::ThreadMode::DIRECT) {
-                cannedMessageModule->LaunchFreetextWithDestination(peer);
-
+                menuHandler::pendingFreetextDest = peer;
+                menuHandler::pendingFreetextChannel = 0;
             } else {
-                // Fallback for last received message
                 if (devicestate.rx_text_message.to == NODENUM_BROADCAST) {
-                    cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST, devicestate.rx_text_message.channel);
+                    menuHandler::pendingFreetextDest = NODENUM_BROADCAST;
+                    menuHandler::pendingFreetextChannel = devicestate.rx_text_message.channel;
                 } else {
-                    cannedMessageModule->LaunchFreetextWithDestination(devicestate.rx_text_message.from);
+                    menuHandler::pendingFreetextDest = devicestate.rx_text_message.from;
+                    menuHandler::pendingFreetextChannel = 0;
                 }
             }
-
+            menuHandler::menuQueue = menuHandler::FreetextLaunchMenu;
+            screen->runNow();
             return;
         }
     };
@@ -920,7 +941,8 @@ void menuHandler::messageViewModeMenu()
 
 void menuHandler::homeBaseMenu()
 {
-    enum optionsNumbers { Back, Mute, Backlight, Position, Preset, Freetext, Sleep, enumEnd };
+    enum optionsNumbers { Back, Mute, Backlight, Position, Preset, Freetext, Sleep,
+                          Nodes, Lora, Settings, Channels, Identity, EditChannels, enumEnd };
 
     static const char *optionsArray[enumEnd] = {"Back"};
     static int optionsEnumArray[enumEnd] = {Back};
@@ -948,6 +970,23 @@ void menuHandler::homeBaseMenu()
         optionsArray[options] = "Send Node Info";
     }
     optionsEnumArray[options++] = Position;
+
+    // Navigation into the upstream Meshtastic menu tree. These already exist
+    // (loraMenu, NodePickerMenu, systemBaseMenu) but had no entry point from
+    // the FreeWili home menu, so settings, region/preset, channel, and
+    // initiating a DM to a picked node were unreachable.
+    optionsArray[options] = "Nodes";
+    optionsEnumArray[options++] = Nodes;
+    optionsArray[options] = "LoRa";
+    optionsEnumArray[options++] = Lora;
+    optionsArray[options] = "Settings";
+    optionsEnumArray[options++] = Settings;
+    optionsArray[options] = "Channels";
+    optionsEnumArray[options++] = Channels;
+    optionsArray[options] = "Identity";
+    optionsEnumArray[options++] = Identity;
+    optionsArray[options] = "Edit Channels";
+    optionsEnumArray[options++] = EditChannels;
 
     BannerOverlayOptions bannerOptions;
     bannerOptions.message = "Home Action";
@@ -987,16 +1026,47 @@ void menuHandler::homeBaseMenu()
         } else if (selected == Sleep) {
             screen->setOn(false);
         } else if (selected == Position) {
+            ::g_menu_position_branch++;
             service->refreshLocalMeshNode();
             if (service->trySendPosition(NODENUM_BROADCAST, true)) {
                 IF_SCREEN(screen->showSimpleBanner("Position\nSent", 3000));
             } else {
+                // No GPS — upstream code shows "Node Info Sent" banner without
+                // actually transmitting anything. Trigger a real NodeInfo
+                // broadcast so the banner matches reality and the mesh learns
+                // about us.
+                if (nodeInfoModule) {
+                    nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, true, 0, false);
+                }
                 IF_SCREEN(screen->showSimpleBanner("Node Info\nSent", 3000));
             }
         } else if (selected == Preset) {
             cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
         } else if (selected == Freetext) {
-            cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST);
+            // Defer to next dispatch so the banner cleanup doesn't race with
+            // showTextInput's overlay setup (same fix pattern as Identity).
+            menuHandler::pendingFreetextDest = NODENUM_BROADCAST;
+            menuHandler::pendingFreetextChannel = 0;
+            menuHandler::menuQueue = menuHandler::FreetextLaunchMenu;
+            screen->runNow();
+        } else if (selected == Nodes) {
+            menuHandler::menuQueue = menuHandler::NodePickerMenu;
+            screen->runNow();
+        } else if (selected == Lora) {
+            menuHandler::menuQueue = menuHandler::LoraMenu;
+            screen->runNow();
+        } else if (selected == Settings) {
+            menuHandler::menuQueue = menuHandler::SystemBaseMenu;
+            screen->runNow();
+        } else if (selected == Channels) {
+            menuHandler::menuQueue = menuHandler::ChannelPickerMenu;
+            screen->runNow();
+        } else if (selected == Identity) {
+            menuHandler::menuQueue = menuHandler::IdentityMenu;
+            screen->runNow();
+        } else if (selected == EditChannels) {
+            menuHandler::menuQueue = menuHandler::ChannelEditorMenu;
+            screen->runNow();
         }
     };
     screen->showOverlayBanner(bannerOptions);
@@ -1030,7 +1100,10 @@ void menuHandler::textMessageBaseMenu()
         if (selected == Preset) {
             cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
         } else if (selected == Freetext) {
-            cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST);
+            menuHandler::pendingFreetextDest = NODENUM_BROADCAST;
+            menuHandler::pendingFreetextChannel = 0;
+            menuHandler::menuQueue = menuHandler::FreetextLaunchMenu;
+            screen->runNow();
         }
     };
     screen->showOverlayBanner(bannerOptions);
@@ -1349,10 +1422,16 @@ void menuHandler::manageNodeMenu()
     if (!node) {
         return;
     }
-    enum optionsNumbers { Back, Favorite, Mute, TraceRoute, KeyVerification, Ignore, enumEnd };
+    enum optionsNumbers { Back, SendMessage, Favorite, Mute, TraceRoute, KeyVerification, Ignore, enumEnd };
     static const char *optionsArray[enumEnd] = {"Back"};
     static int optionsEnumArray[enumEnd] = {Back};
     int options = 1;
+
+    // Lets the user DM the node they just picked from NodePicker. Upstream
+    // manageNodeMenu didn't include this — DMs were only reachable as replies
+    // to received messages.
+    optionsArray[options] = "Send Message";
+    optionsEnumArray[options++] = SendMessage;
 
     if (node->is_favorite) {
         optionsArray[options] = "Unfavorite";
@@ -1400,6 +1479,11 @@ void menuHandler::manageNodeMenu()
         if (selected == Back) {
             menuQueue = NodeBaseMenu;
             screen->runNow();
+            return;
+        }
+
+        if (selected == SendMessage) {
+            cannedMessageModule->LaunchWithDestination(menuHandler::pickedNodeNum);
             return;
         }
 
@@ -2620,6 +2704,288 @@ void menuHandler::displayUnitsMenu()
     screen->showOverlayBanner(bannerOptions);
 }
 
+void menuHandler::identityMenu()
+{
+    enum optionsNumbers { Back = 0, SetShort = 1, SetLong = 2 };
+    static const char *labels[3] = {"Back", "Set Short Name", "Set Long Name"};
+
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Identity";
+    bannerOptions.optionsArrayPtr = labels;
+    bannerOptions.optionsCount = 3;
+    // Don't call showTextInput inline from the banner callback: the banner's
+    // own cleanup runs after our callback and tears down the text-input state
+    // we'd try to install. Instead, queue another menu to fire on the next
+    // dispatch tick; setShortNameMenu / setLongNameMenu then call showTextInput
+    // from a clean state.
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == SetShort) {
+            menuHandler::menuQueue = menuHandler::SetShortNameMenu;
+            screen->runNow();
+        } else if (selected == SetLong) {
+            menuHandler::menuQueue = menuHandler::SetLongNameMenu;
+            screen->runNow();
+        }
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+// Push the current `owner` user struct into our own NodeDB entry. UIRenderer
+// reads long_name from ourNode->user.long_name (NodeDB), not from owner — so
+// without this the home screen's long name stays stale until a reboot loads
+// it back from disk. Channel index 0 = primary; nodeDB->updateUser copies
+// fields into the local entry and notifies observers so screens redraw.
+static void freewili_push_owner_to_nodedb()
+{
+    if (!nodeDB) return;
+    nodeDB->updateUser(nodeDB->getNodeNum(), owner, 0);
+}
+
+void menuHandler::setShortNameMenu()
+{
+    screen->showTextInput(
+        "Short Name",
+        owner.short_name && owner.short_name[0] ? owner.short_name : "",
+        60000,
+        [](const std::string &text) {
+            // Keep within the protobuf field's char[5] (4 chars + NUL).
+            strncpy(owner.short_name, text.c_str(), sizeof(owner.short_name) - 1);
+            owner.short_name[sizeof(owner.short_name) - 1] = '\0';
+            freewili_push_owner_to_nodedb();
+            // Re-broadcast our NodeInfo so neighbors learn the new name.
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, true, 0, false);
+            }
+        });
+}
+
+void menuHandler::setLongNameMenu()
+{
+    screen->showTextInput(
+        "Long Name",
+        owner.long_name && owner.long_name[0] ? owner.long_name : "",
+        60000,
+        [](const std::string &text) {
+            strncpy(owner.long_name, text.c_str(), sizeof(owner.long_name) - 1);
+            owner.long_name[sizeof(owner.long_name) - 1] = '\0';
+            freewili_push_owner_to_nodedb();
+            if (nodeInfoModule) {
+                nodeInfoModule->sendOurNodeInfo(NODENUM_BROADCAST, true, 0, false);
+            }
+        });
+}
+
+// ===== Channel Editor =====
+// Multi-step flow: pick (or new) → name → passphrase → role → save.
+// Held in static editingChannelIndex (-1 means "create new — pick next free slot
+// when we save"). The name and PSK fields are written straight into the live
+// channelFile entry as the user fills them; role-pick is the commit step that
+// also calls setChannel/reloadConfig so the radio stack picks up the change.
+
+// Diagnostic counters so we can SWD-confirm the dispatch + keyboard launch.
+volatile uint32_t g_freetext_dispatch_count __attribute__((used)) = 0;
+volatile uint32_t g_freetext_showinput_count __attribute__((used)) = 0;
+volatile uint32_t g_freetext_callback_count __attribute__((used)) = 0;
+volatile uint32_t g_freetext_text_len __attribute__((used)) = 0;
+
+void menuHandler::freetextLaunchMenu()
+{
+    g_freetext_dispatch_count++;
+    if (!cannedMessageModule) return;
+    g_freetext_showinput_count++;
+    // We're now outside the banner callback frame, so LaunchFreetextWithDestination's
+    // showTextInput call (on FREEWILI) can set up its overlay safely.
+    cannedMessageModule->LaunchFreetextWithDestination(pendingFreetextDest, pendingFreetextChannel);
+}
+
+void menuHandler::channelEditorMenu()
+{
+    // List existing non-disabled channels + "+ New Channel" entry, then chain
+    // into the name editor when picked.
+    static const uint8_t kMaxRows = 9;  // Back + 8 channels (incl. New)
+    static const char *labels[kMaxRows];
+    static int picked_index[kMaxRows];     // channel slot per label, -1 = New, -2 = Back
+    static char nameBufs[kMaxRows][16];
+
+    int count = 0;
+    labels[count] = "Back";
+    picked_index[count++] = -2;
+
+    labels[count] = "+ New Channel";
+    picked_index[count++] = -1;
+
+    int numCh = channels.getNumChannels();
+    for (int i = 0; i < numCh && count < kMaxRows; ++i) {
+        const meshtastic_Channel &ch = channels.getByIndex((uint8_t)i);
+        if (ch.role == meshtastic_Channel_Role_DISABLED) continue;
+        const char *name = channels.getName((size_t)i);
+        snprintf(nameBufs[count], sizeof(nameBufs[count]), "%.15s",
+                 (name && name[0]) ? name : "(unnamed)");
+        labels[count] = nameBufs[count];
+        picked_index[count] = i;
+        count++;
+    }
+
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Channel Editor";
+    bannerOptions.optionsArrayPtr = labels;
+    bannerOptions.optionsCount = count;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected <= 0) return;  // Back or out of range
+        int slot = picked_index[selected];
+        if (slot == -1) {
+            // Find the lowest DISABLED slot to use as a new channel. If none
+            // free, fall back to slot 1 (slot 0 is the primary).
+            int newSlot = -1;
+            int n = channels.getNumChannels();
+            for (int i = 1; i < n; ++i) {
+                if (channels.getByIndex((uint8_t)i).role == meshtastic_Channel_Role_DISABLED) {
+                    newSlot = i;
+                    break;
+                }
+            }
+            if (newSlot < 0) newSlot = (n >= 1) ? 1 : 0;
+            editingChannelIndex = newSlot;
+            // Initialize the slot to a clean state: zero name, empty PSK,
+            // role=DISABLED (will be set in the role step).
+            meshtastic_Channel ch = channels.getByIndex((uint8_t)newSlot);
+            ch.index = newSlot;
+            ch.has_settings = true;
+            memset(ch.settings.name, 0, sizeof(ch.settings.name));
+            ch.settings.psk.size = 0;
+            memset(ch.settings.psk.bytes, 0, sizeof(ch.settings.psk.bytes));
+            ch.role = meshtastic_Channel_Role_DISABLED;
+            channels.setChannel(ch);
+        } else {
+            editingChannelIndex = slot;
+        }
+        menuHandler::menuQueue = menuHandler::ChannelEditNameMenu;
+        screen->runNow();
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::channelEditNameMenu()
+{
+    if (editingChannelIndex < 0) return;
+    meshtastic_Channel &ch = channels.getByIndex((uint8_t)editingChannelIndex);
+    screen->showTextInput("Channel Name", ch.settings.name, 60000,
+                          [](const std::string &text) {
+                              if (editingChannelIndex < 0) return;
+                              meshtastic_Channel ch = channels.getByIndex((uint8_t)editingChannelIndex);
+                              strncpy(ch.settings.name, text.c_str(), sizeof(ch.settings.name) - 1);
+                              ch.settings.name[sizeof(ch.settings.name) - 1] = '\0';
+                              ch.has_settings = true;
+                              channels.setChannel(ch);
+                              menuHandler::menuQueue = menuHandler::ChannelEditPskMenu;
+                              screen->runNow();
+                          });
+}
+
+void menuHandler::channelEditPskMenu()
+{
+    if (editingChannelIndex < 0) return;
+    screen->showTextInput(
+        "Passphrase (blank=public)", "", 60000, [](const std::string &text) {
+            if (editingChannelIndex < 0) return;
+            meshtastic_Channel ch = channels.getByIndex((uint8_t)editingChannelIndex);
+            // Convert passphrase to 16-byte AES128 PSK: ASCII pad/truncate.
+            // Empty passphrase → PSK size 0 (no encryption, public channel).
+            memset(ch.settings.psk.bytes, 0, sizeof(ch.settings.psk.bytes));
+            if (text.empty()) {
+                ch.settings.psk.size = 0;
+            } else {
+                size_t n = text.size();
+                if (n > 16) n = 16;
+                memcpy(ch.settings.psk.bytes, text.data(), n);
+                ch.settings.psk.size = 16;
+            }
+            ch.has_settings = true;
+            channels.setChannel(ch);
+            menuHandler::menuQueue = menuHandler::ChannelEditRoleMenu;
+            screen->runNow();
+        });
+}
+
+void menuHandler::channelEditRoleMenu()
+{
+    enum optionsNumbers { Back = 0, Disabled = 1, Secondary = 2, Primary = 3 };
+    static const char *labels[4] = {"Back", "Disabled", "Secondary", "Primary"};
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Channel Role";
+    bannerOptions.optionsArrayPtr = labels;
+    bannerOptions.optionsCount = 4;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (editingChannelIndex < 0) return;
+        if (selected == Back) return;
+        meshtastic_Channel ch = channels.getByIndex((uint8_t)editingChannelIndex);
+        if (selected == Disabled) ch.role = meshtastic_Channel_Role_DISABLED;
+        else if (selected == Secondary) ch.role = meshtastic_Channel_Role_SECONDARY;
+        else if (selected == Primary) ch.role = meshtastic_Channel_Role_PRIMARY;
+        ch.has_settings = true;
+        channels.setChannel(ch);
+        // Reload the channel config so the radio stack picks up the new
+        // primary/PSK/etc. saveProto is no-op on FREEWILI so this only
+        // updates in-memory state — that's enough until reboot.
+        if (service) service->reloadConfig(SEGMENT_CHANNELS);
+        editingChannelIndex = -1;
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::channelPickerMenu()
+{
+    // Enumerate currently-configured channels and let the user pick one to
+    // compose a broadcast message on. Without this, every text message goes
+    // out on the primary channel (channel 0). Useful when multiple channels
+    // are configured (LongFast public + private channels, etc.).
+    static const uint8_t kMaxChannels = 8;
+    static const char *labels[kMaxChannels + 1];   // +1 for "Back"
+    static int enumValues[kMaxChannels + 1];
+    static int channelIndices[kMaxChannels + 1];   // parallel: which channel each option targets
+    static char nameBufs[kMaxChannels][16];
+
+    int count = 0;
+    labels[count] = "Back";
+    enumValues[count] = -1;
+    channelIndices[count] = -1;
+    count++;
+
+    int numCh = channels.getNumChannels();
+    if (numCh > kMaxChannels) numCh = kMaxChannels;
+    for (int i = 0; i < numCh; ++i) {
+        // Skip slots not in use — their getName() falls back to the modem
+        // preset ("LongFast"), so showing them produced "LongFast" repeated
+        // with no way to differentiate.
+        const meshtastic_Channel &ch = channels.getByIndex((uint8_t)i);
+        if (ch.role == meshtastic_Channel_Role_DISABLED) continue;
+
+        const char *name = channels.getName((size_t)i);
+        if (!name || !name[0]) {
+            snprintf(nameBufs[i], sizeof(nameBufs[i]), "Ch %d", i);
+        } else {
+            snprintf(nameBufs[i], sizeof(nameBufs[i]), "%.15s", name);
+        }
+        labels[count] = nameBufs[i];
+        enumValues[count] = count;
+        channelIndices[count] = i;
+        count++;
+    }
+
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Channel";
+    bannerOptions.optionsArrayPtr = labels;
+    bannerOptions.optionsEnumPtr = enumValues;
+    bannerOptions.optionsCount = count;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected < 0) return;
+        int ch = channelIndices[selected];
+        if (ch < 0) return;
+        cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST, (uint8_t)ch);
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
 void menuHandler::messageBubblesMenu()
 {
     enum optionsNumbers { Back, ShowBubbles, HideBubbles };
@@ -2793,6 +3159,33 @@ void menuHandler::handleMenuSwitch(OLEDDisplay *display)
         break;
     case MessageViewModeMenu:
         messageViewModeMenu();
+        break;
+    case ChannelPickerMenu:
+        channelPickerMenu();
+        break;
+    case IdentityMenu:
+        identityMenu();
+        break;
+    case SetShortNameMenu:
+        setShortNameMenu();
+        break;
+    case SetLongNameMenu:
+        setLongNameMenu();
+        break;
+    case ChannelEditorMenu:
+        channelEditorMenu();
+        break;
+    case ChannelEditNameMenu:
+        channelEditNameMenu();
+        break;
+    case ChannelEditPskMenu:
+        channelEditPskMenu();
+        break;
+    case ChannelEditRoleMenu:
+        channelEditRoleMenu();
+        break;
+    case FreetextLaunchMenu:
+        freetextLaunchMenu();
         break;
     case MessageBubblesMenu:
         messageBubblesMenu();

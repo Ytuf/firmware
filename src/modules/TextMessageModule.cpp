@@ -1,6 +1,11 @@
 #include "TextMessageModule.h"
 #include "MeshService.h"
 #include "MessageStore.h"
+
+#if defined(FREEWILI)
+extern "C" void freewili_led_pulse_all(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms);
+extern "C" void freewili_audio_play_rx(void);
+#endif
 #include "NodeDB.h"
 #include "PowerFSM.h"
 #include "buzz.h"
@@ -16,6 +21,15 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
 #if defined(DEBUG_PORT) && !defined(DEBUG_MUTE)
     auto &p = mp.decoded;
     LOG_INFO("Received text msg from=0x%0x, id=0x%x, msg=%.*s", mp.from, mp.id, p.payload.size, p.payload.bytes);
+#endif
+
+#if defined(FREEWILI)
+    // New text message arrived: blue blink across all LEDs + 880 Hz tone.
+    // Distinct from the generic green RX blink in UARTRadioInterface — that
+    // fires for every received packet (telemetry, position, etc.), this only
+    // fires for actual text messages addressed to us.
+    freewili_led_pulse_all(/*r=*/0, /*g=*/8, /*b=*/30, /*duration_ms=*/60);
+    freewili_audio_play_rx();  // 880 Hz, 80 ms — bit-bang blocks CPU briefly
 #endif
     // add packet ID to the rolling list of packets
     textPacketList[textPacketListIndex] = mp.id;

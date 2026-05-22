@@ -702,6 +702,8 @@ bool Power::setup()
         found = true;
     } else if (cw2015Init()) {
         found = true;
+    } else if (bq27441Init()) {
+        found = true;
     } else if (max17048Init()) {
         found = true;
     } else if (lipoChargerInit()) {
@@ -1482,6 +1484,98 @@ bool Power::cw2015Init()
  * The CW2015 battery level sensor is unavailable - default to AnalogBatteryLevel
  */
 bool Power::cw2015Init()
+{
+    return false;
+}
+#endif
+
+#if !MESHTASTIC_EXCLUDE_I2C && defined(HAS_BQ27441) && HAS_BQ27441
+
+// BQ27441-G1 fuel gauge, direct I2C. Standard registers (Technical Reference
+// SLUUAC9A, table 4-1):
+//   0x04 VOLT   uint16 mV
+//   0x06 FLAGS  uint16  (bit 0 DSG, bit 5 BAT_DET, bit 8 FC, bit 9 CHG)
+//   0x10 AvgI   int16  mA, +ve = into battery (charging)
+//   0x1C SoC    uint16 %, 0..100
+// Reads are delegated to the variant. The variant probes the chip very early
+// (in initIOExpanderPicoSDK before Arduino-Pico's Wire.begin runs) — that's
+// the only point during boot where reads actually return data on this
+// hardware. The cached helper below returns fresh values when the live read
+// works, or the early-boot cache when it doesn't.
+extern "C" bool freewili_bq27441_present(void);
+extern "C" bool freewili_bq27441_read_word_cached(uint8_t reg, uint16_t *out);
+
+class BQ27441BatteryLevel : public AnalogBatteryLevel
+{
+  public:
+    virtual int getBatteryPercent() override
+    {
+        uint16_t soc;
+        if (!freewili_bq27441_read_word_cached(0x1C, &soc))
+            return -1;
+        if (soc > 100)
+            return -1; // chip not initialized / spurious read
+        return (int)soc;
+    }
+
+    virtual uint16_t getBattVoltage() override
+    {
+        uint16_t mv;
+        if (!freewili_bq27441_read_word_cached(0x04, &mv))
+            return 0;
+        return mv;
+    }
+
+    virtual bool isBatteryConnect() override
+    {
+        // FLAGS bit 5 (BAT_DET) is the chip's own battery-presence flag.
+        // It only goes high after the cell capacity learning cycle, so on a
+        // freshly powered unit we fall back to "voltage looks plausible."
+        uint16_t flags;
+        if (freewili_bq27441_read_word_cached(0x06, &flags) && (flags & (1u << 5)))
+            return true;
+        return getBattVoltage() > 2500; // ~empty lipo cutoff
+    }
+
+    virtual bool isCharging() override
+    {
+        // AvgCurrent is signed; +ve = current flowing into the battery.
+        // Threshold of +20 mA filters quiescent gauge noise.
+        uint16_t raw;
+        if (!freewili_bq27441_read_word_cached(0x10, &raw))
+            return false;
+        int16_t ma = (int16_t)raw;
+        return ma > 20;
+    }
+};
+
+BQ27441BatteryLevel bq27441Level;
+
+/**
+ * Adopt the BQ27441 as the battery level sensor if the variant's early
+ * I2C probe found it. The probe runs in initIOExpanderPicoSDK — Power::setup
+ * runs later and the chip is no longer readable then, so we trust the
+ * cached presence flag instead of re-probing.
+ */
+bool Power::bq27441Init()
+{
+    if (!freewili_bq27441_present()) {
+        LOG_DEBUG("BQ27441: not detected at boot probe");
+        return false;
+    }
+    uint16_t soc = 0;
+    freewili_bq27441_read_word_cached(0x1C, &soc);
+    if (soc > 100) {
+        LOG_WARN("BQ27441: implausible SoC=%u (chip unconfigured?)", soc);
+        // Adopt anyway — subsequent reads may settle once the chip wakes.
+    }
+    LOG_INFO("BQ27441 detected, SoC=%u%%", soc);
+    batteryLevel = &bq27441Level;
+    return true;
+}
+
+#else
+bool Power::bq27441Init()
 {
     return false;
 }

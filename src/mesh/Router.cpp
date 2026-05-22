@@ -310,6 +310,8 @@ ErrorCode Router::rawSend(meshtastic_MeshPacket *p)
  */
 ErrorCode Router::send(meshtastic_MeshPacket *p)
 {
+    extern volatile uint32_t g_router_send_entry;
+    g_router_send_entry++;
     if (isToUs(p)) {
         LOG_ERROR("BUG! send() called with packet destined for local node!");
         packetPool.release(p);
@@ -398,6 +400,8 @@ ErrorCode Router::send(meshtastic_MeshPacket *p)
     }
 #endif
 
+    extern volatile uint32_t g_router_before_iface;
+    g_router_before_iface++;
     assert(iface); // This should have been detected already in sendLocal (or we just received a packet from outside)
     return iface->send(p);
 }

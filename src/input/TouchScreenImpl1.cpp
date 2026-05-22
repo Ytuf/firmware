@@ -55,11 +55,23 @@ void TouchScreenImpl1::onEvent(const TouchEvent &event)
 
     switch (event.touchEvent) {
     case TOUCH_ACTION_LEFT: {
+#if defined(FREEWILI)
+        // Touchscreen "swipe LEFT" = finger drags content to the left, which
+        // should reveal the NEXT frame. Screen.cpp routes INPUT_BROKER_RIGHT
+        // to NEXT, so swap here. (Dpad and keyboard still get the
+        // direction-matches-arrow semantics from PICButtonInput unchanged.)
+        e.inputEvent = INPUT_BROKER_RIGHT;
+#else
         e.inputEvent = INPUT_BROKER_LEFT;
+#endif
         break;
     }
     case TOUCH_ACTION_RIGHT: {
+#if defined(FREEWILI)
+        e.inputEvent = INPUT_BROKER_LEFT;
+#else
         e.inputEvent = INPUT_BROKER_RIGHT;
+#endif
         break;
     }
     case TOUCH_ACTION_UP: {

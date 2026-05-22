@@ -431,6 +431,8 @@ static LGFX *tft = nullptr;
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
+#include "hardware/i2c.h" // For raw pico-sdk i2c_*_blocking_until in getTouch
+#include "pico/time.h"
 #include <Wire.h> // For FT5316 touch I2C reads
 
 #define TFT_BLACK 0x0000
@@ -1552,32 +1554,61 @@ bool TFTDisplay::getTouch(int16_t *x, int16_t *y)
         return false;
     }
 #elif defined(FREEWILI)
-    // FT5316 (FT5x06 family) on I2C1 at TOUCH_ADDRESS (0x38)
-    // Only read I2C when TOUCH_INT is LOW (touch active) — chip NACKs when idle
-#ifdef SCREEN_TOUCH_INT
-    if (gpio_get(SCREEN_TOUCH_INT))
-        return false; // INT high = no touch
-#endif
-    Wire.beginTransmission(TOUCH_ADDRESS);
-    Wire.write(0x02); // TD_STATUS register
-    if (Wire.endTransmission(false) != 0)
-        return false;
-    Wire.requestFrom((uint8_t)TOUCH_ADDRESS, (uint8_t)5);
-    if (Wire.available() < 5)
-        return false;
-    uint8_t touchPoints = Wire.read() & 0x0F;
-    uint8_t xHi = Wire.read();
-    uint8_t xLo = Wire.read();
-    uint8_t yHi = Wire.read();
-    uint8_t yLo = Wire.read();
-    if (touchPoints == 0)
-        return false;
-    int16_t rawX = ((xHi & 0x0F) << 8) | xLo;
-    int16_t rawY = ((yHi & 0x0F) << 8) | yLo;
-    // Panel is 320x480 portrait, display uses MADCTL=0x2C (SWAP_XY | HORIZ_ORDER)
-    *x = rawY;
-    *y = 319 - rawX;
-    return true;
+    // FT5316 (FT5x06 family) on I2C1 at TOUCH_ADDRESS (0x38).
+    // Bypass Arduino Wire: arduino-pico's TwoWire::endTransmission ignores the
+    // setTimeout() value and can block on bus contention for *seconds*. That
+    // shows up as a multi-second total UI freeze because the touch poll thread
+    // blocks everything behind it. Call pico-sdk's i2c_*_blocking_until with
+    // an explicit 2 ms deadline so a hung transaction fails fast and the next
+    // poll just retries.
+    extern volatile uint32_t g_touch_i2c_fail_count;
+    extern volatile uint32_t g_touch_i2c_ok_count;
+    uint8_t reg = 0x02; // TD_STATUS
+    int wrote = i2c_write_blocking_until(i2c1, TOUCH_ADDRESS, &reg, 1, true,
+                                         make_timeout_time_us(2000));
+    if (wrote != 1) { g_touch_i2c_fail_count++; return false; }
+    uint8_t buf[5];
+    int read = i2c_read_blocking_until(i2c1, TOUCH_ADDRESS, buf, 5, false,
+                                       make_timeout_time_us(2000));
+    if (read != 5) { g_touch_i2c_fail_count++; return false; }
+    g_touch_i2c_ok_count++;
+    {
+        uint8_t touchPoints = buf[0] & 0x0F;
+        uint8_t xHi = buf[1];
+        uint8_t xLo = buf[2];
+        uint8_t yHi = buf[3];
+        uint8_t yLo = buf[4];
+        if (touchPoints == 0)
+            return false;
+        int16_t rawX = ((xHi & 0x0F) << 8) | xLo;
+        int16_t rawY = ((yHi & 0x0F) << 8) | yLo;
+        // Touch-coord diagnostic globals. Read via SWD while tapping known
+        // points on the screen to derive a correct transform.
+        extern volatile int16_t g_touch_raw_x;
+        extern volatile int16_t g_touch_raw_y;
+        extern volatile int16_t g_touch_screen_x;
+        extern volatile int16_t g_touch_screen_y;
+        g_touch_raw_x = rawX;
+        g_touch_raw_y = rawY;
+        // Calibrated from FT5316 readings on FW2 hardware (2026-05-21):
+        //   top-left  → raw_x=290, raw_y=8       expected screen (0, 0)
+        //   bot-right → raw_x=0,   raw_y=478     expected screen (479, 319)
+        // So rawY spans 0..479 = screen X directly (no inversion), and rawX
+        // spans 0..319 inverted = screen Y (rawX=319 is top, rawX=0 is bottom).
+        // Old code assumed rawX was on a 0..479 range and scaled by 320/480;
+        // that's why a tap at the top landed in the middle of the screen.
+        if (rawX > 319) rawX = 319;
+        if (rawY > 479) rawY = 479;
+        *x = rawY;
+        *y = 319 - rawX;
+        if (*x < 0) *x = 0;
+        if (*y < 0) *y = 0;
+        if (*x >= 480) *x = 479;
+        if (*y >= 320) *y = 319;
+        g_touch_screen_x = *x;
+        g_touch_screen_y = *y;
+        return true;
+    }
 #elif !defined(M5STACK) && !defined(HACKADAY_COMMUNICATOR) && !defined(HELTEC_MESH_NODE_T096)
     return tft->getTouch(x, y);
 #else

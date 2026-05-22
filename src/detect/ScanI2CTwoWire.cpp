@@ -223,11 +223,20 @@ bool detectSHT21SerialNumber(TwoWire *i2cBus, uint8_t address)
         type = T;                                                                                                                \
         break;
 
+// SWD-readable boot trace. Updated as scanPort iterates so a halt during a
+// hang shows the address that wedged the bus.
+volatile uint8_t  g_scan_current_addr __attribute__((used)) = 0xFF;
+volatile uint8_t  g_scan_current_port __attribute__((used)) = 0xFF;
+volatile uint32_t g_scan_iter_count   __attribute__((used)) = 0;
+volatile uint8_t  g_scan_last_err     __attribute__((used)) = 0xFF;
+volatile uint8_t  g_scan_phase        __attribute__((used)) = 0;  // 1=begin, 2=end, 3=switch, 4=done
+
 void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
 {
     concurrency::LockGuard guard((concurrency::Lock *)&lock);
 
     LOG_DEBUG("Scan for I2C devices on port %d", port);
+    g_scan_current_port = (uint8_t)port;
 
     uint8_t err;
 
@@ -265,6 +274,19 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 continue;
             LOG_DEBUG("Scan address 0x%x", (uint8_t)addr.address);
         }
+#if defined(FREEWILI)
+        // 0x55 is the BQ27441 fuel gauge on FW2; the TDECK_KB_ADDR case below
+        // does a register read that the BQ27441 doesn't ACK the same way as a
+        // T-Deck keyboard or BQ27220, and the I2C peripheral hangs waiting for
+        // ACK forever. That hang is the "intermittent freeze" — main loop never
+        // starts, screen never updates. The fuel gauge is already driven from
+        // Power.cpp under HAS_BQ27441, so we can skip auto-detect entirely.
+        if (addr.address == 0x55)
+            continue;
+#endif
+        g_scan_current_addr = (uint8_t)addr.address;
+        g_scan_iter_count++;
+        g_scan_phase = 1;
         i2cBus->beginTransmission(addr.address);
 #ifdef ARCH_PORTDUINO
         err = 2;
@@ -277,7 +299,10 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
         if (err != 0)
             err = 2;
 #else
+        g_scan_phase = 2;
         err = i2cBus->endTransmission();
+        g_scan_last_err = err;
+        g_scan_phase = 3;
 #endif
         type = NONE;
         if (err == 0) {

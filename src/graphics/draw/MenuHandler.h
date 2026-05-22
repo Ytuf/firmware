@@ -55,7 +55,16 @@ class menuHandler
         NodeNameLengthMenu,
         FrameToggles,
         DisplayUnits,
-        MessageBubblesMenu
+        MessageBubblesMenu,
+        ChannelPickerMenu,
+        IdentityMenu,
+        SetShortNameMenu,
+        SetLongNameMenu,
+        ChannelEditorMenu,
+        ChannelEditNameMenu,
+        ChannelEditPskMenu,
+        ChannelEditRoleMenu,
+        FreetextLaunchMenu
     };
     static screenMenus menuQueue;
     static uint32_t pickedNodeNum; // node selected by NodePicker for ManageNodeMenu
@@ -111,6 +120,22 @@ class menuHandler
     static void displayUnitsMenu();
     static void messageBubblesMenu();
     static void textMessageMenu();
+    static void channelPickerMenu();
+    static void identityMenu();
+    static void setShortNameMenu();
+    static void setLongNameMenu();
+    static void channelEditorMenu();
+    static void channelEditNameMenu();
+    static void channelEditPskMenu();
+    static void channelEditRoleMenu();
+    static void freetextLaunchMenu();
+    // Channel-being-edited state, used across the multi-step editor flow.
+    static int editingChannelIndex;
+    // Pending freetext launch parameters (set by a banner callback that
+    // wants to launch the popup keyboard; consumed by freetextLaunchMenu
+    // on the next dispatch tick).
+    static uint32_t pendingFreetextDest;
+    static uint8_t  pendingFreetextChannel;
 
   private:
     static void saveUIConfig();

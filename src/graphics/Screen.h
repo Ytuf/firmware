@@ -713,11 +713,11 @@ class Screen : public concurrency::OSThread
         bool system = false;
         bool home = false;
         bool clock = false;
-#ifndef USE_EINK
+#if !defined(USE_EINK) && !defined(FREEWILI)
         bool nodelist_nodes = false;
         bool nodelist_location = false;
 #endif
-#ifdef USE_EINK
+#if defined(USE_EINK) || defined(FREEWILI)
         bool nodelist_lastheard = false;
         bool nodelist_hopsignal = false;
         bool nodelist_distance = false;

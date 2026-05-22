@@ -1,4 +1,8 @@
 #include "configuration.h"
+#if defined(FREEWILI)
+#include "buzz/BuzzerFeedbackThread.h"  // for haptic feedback on button press
+extern "C" void freewili_set_tz(const char *tz);
+#endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
 #endif
@@ -830,6 +834,25 @@ void setup()
     // TODO Remove magic string
     // setup TZ prior to time actions.
 #if !MESHTASTIC_EXCLUDE_TZ
+#if defined(FREEWILI)
+    // FreeWili: newlib's setenv() crashes (see variant.cpp for the
+    // pre-populated environ workaround). freewili_set_tz() writes directly
+    // into the static "TZ=" slot and calls tzset(), so the rest of the
+    // codebase (which reads via getenv("TZ") or localtime_r) just works.
+    LOG_DEBUG("Use compiled/slipstreamed %s", slipstreamTZString);
+    if (*config.device.tzdef && config.device.tzdef[0] != 0) {
+        LOG_DEBUG("Saved TZ: %s ", config.device.tzdef);
+        freewili_set_tz(config.device.tzdef);
+    } else {
+        if (strncmp((const char *)slipstreamTZString, "tzpl", 4) == 0) {
+            freewili_set_tz("GMT0");
+        } else {
+            freewili_set_tz((const char *)slipstreamTZString);
+            strcpy(config.device.tzdef, (const char *)slipstreamTZString);
+        }
+    }
+    LOG_DEBUG("Set Timezone to %s", getenv("TZ"));
+#else
     LOG_DEBUG("Use compiled/slipstreamed %s", slipstreamTZString); // important, removing this clobbers our magic string
     if (*config.device.tzdef && config.device.tzdef[0] != 0) {
         LOG_DEBUG("Saved TZ: %s ", config.device.tzdef);
@@ -844,6 +867,7 @@ void setup()
     }
     tzset();
     LOG_DEBUG("Set Timezone to %s", getenv("TZ"));
+#endif
 #endif
 
     readFromRTC(); // read the main CPU RTC at first (in case we can't get GPS time)
@@ -897,6 +921,17 @@ void setup()
 #endif
 #endif
 
+#if !MESHTASTIC_EXCLUDE_INPUTBROKER && defined(FREEWILI)
+    // Construct inputBroker BEFORE setupModules() so module constructors that
+    // call inputObserver.observe(inputBroker) (CannedMessageModule, etc.) see
+    // a non-null pointer and actually register themselves. Modules.cpp:115-121
+    // only constructs inputBroker when HAS_BUTTON || ARCH_PORTDUINO; FreeWili
+    // is touch-only with HAS_BUTTON=0, so the fallback here is what makes
+    // input work at all.
+    if (!inputBroker)
+        inputBroker = new InputBroker();
+#endif
+
     // Now that the mesh service is created, create any modules
     setupModules();
 
@@ -919,6 +954,13 @@ void setup()
     }
 #endif
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER
+#if defined(FREEWILI)
+    // inputBroker is constructed earlier (before setupModules) so module
+    // constructors can register their observers. Here we just wire up the
+    // direct-GPIO haptic observer.
+    extern void freewili_register_haptic_observer();
+    freewili_register_haptic_observer();
+#endif
     if (inputBroker)
         inputBroker->Init();
 #endif
@@ -951,6 +993,23 @@ void setup()
     if (screen_found.port != ScanI2C::I2CPort::NO_I2C && screen)
         screen->setup();
 #endif
+#endif
+
+#if defined(FREEWILI)
+    // Force a usable LoRa region BEFORE initLoRa() so the radio actually
+    // starts. We do this in RAM only — saving to flash here would trigger
+    // the saveToDisk hash (Task #6). Re-applied every boot; the flash copy
+    // can stay UNSET and we just override.
+    if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+        config.lora.region = meshtastic_Config_LoRaConfig_RegionCode_US;
+    }
+    // Force LongFast US slot 19 freq to match T-Deck reference node. The
+    // hash-derived slot landed Display on a non-standard freq (906.055808
+    // MHz observed via SWD) while T-Deck on the same preset uses 906.875.
+    // override_frequency bypasses the hash entirely and is documented as
+    // the official way to pin freq. RAM-only override (same flash-write
+    // avoidance as the region force above).
+    config.lora.override_frequency = 906.875f;
 #endif
 
     auto rIf = initLoRa();
@@ -1111,10 +1170,71 @@ void scannerToSensorsMap(const std::unique_ptr<ScanI2CTwoWire> &i2cScanner, Scan
 }
 #endif
 
+#if defined(FREEWILI) && defined(USE_UART_RADIO)
+extern "C" void freewili_poll_uart_radio(void);
+#endif
+
 #ifndef PIO_UNIT_TESTING
+// Stutter-tracking globals. The user reports occasional multi-second freezes
+// that the simple processUART counter doesn't see (loop keeps running between
+// freezes, then stalls, then resumes). These record the longest gap between
+// loop iterations and when it happened, so we can confirm a stall in main loop
+// vs. somewhere else (screen task, etc.).
+volatile uint32_t g_loop_max_gap_ms __attribute__((used)) = 0;
+volatile uint32_t g_loop_last_ms    __attribute__((used)) = 0;
+volatile uint32_t g_loop_gap_at_ms  __attribute__((used)) = 0;
+volatile uint32_t g_loop_iter_count __attribute__((used)) = 0;
+// Per-phase markers. Updated as the main loop walks its stages; combined with
+// the gap tracker, this tells us which phase ran long.
+volatile uint8_t  g_loop_phase            __attribute__((used)) = 0;
+volatile uint8_t  g_loop_max_gap_phase    __attribute__((used)) = 0;
+// Per-phase worst times.
+volatile uint32_t g_phase_max_ms[16]      __attribute__((used)) = {0};
+
 void loop()
 {
     runASAP = false;
+
+#if defined(FREEWILI)
+    // Sample each iteration's gap. millis() is monotonic; first iter sees
+    // last_ms==0 which would record a huge bogus initial gap, so skip the
+    // first sample.
+    uint32_t _now_ms = millis();
+    if (g_loop_last_ms != 0) {
+        uint32_t _gap = _now_ms - g_loop_last_ms;
+        if (_gap > g_loop_max_gap_ms) {
+            g_loop_max_gap_ms = _gap;
+            g_loop_gap_at_ms = _now_ms;
+            g_loop_max_gap_phase = g_loop_phase;  // which phase the LAST iter ended in
+        }
+    }
+    g_loop_last_ms = _now_ms;
+    g_loop_iter_count++;
+#endif
+
+#if defined(FREEWILI)
+    #define LOOP_PHASE(n) do {                                           \
+        uint32_t _pre = millis();                                        \
+        g_loop_phase = (uint8_t)(n);                                     \
+        /* track the elapsed time the previous phase took */             \
+        static uint32_t _phase_pre_ms = 0;                               \
+        uint32_t _delta = (_phase_pre_ms == 0) ? 0 : _pre - _phase_pre_ms; \
+        if ((n) > 0 && (n) <= 15 && _delta > g_phase_max_ms[(n)-1])      \
+            g_phase_max_ms[(n)-1] = _delta;                              \
+        _phase_pre_ms = _pre;                                            \
+    } while(0)
+#else
+    #define LOOP_PHASE(n) do {} while(0)
+#endif
+
+    LOOP_PHASE(1);  // about to poll bridge UART
+
+#if defined(FREEWILI) && defined(USE_UART_RADIO)
+    // Drain UART bytes from the WIO-E5 bridge every main loop iteration.
+    // We don't use an OSThread for this — multi-inheritance with
+    // RadioInterface kept the OSThread base from being scheduled.
+    freewili_poll_uart_radio();
+#endif
 
 #ifdef ARCH_ESP32
     esp32Loop();
@@ -1122,8 +1242,10 @@ void loop()
 #ifdef ARCH_NRF52
     nrf52Loop();
 #endif
+    LOOP_PHASE(2);  // about to call powerCommandsCheck
     power->powerCommandsCheck();
 
+    LOOP_PHASE(3);  // about to do radio missed-IRQ + AGC poll
     if (RadioLibInterface::instance != nullptr) {
         static uint32_t lastRadioMissedIrqPoll;
         if (!Throttle::isWithinTimespanMs(lastRadioMissedIrqPoll, 1000)) {
@@ -1147,6 +1269,7 @@ void loop()
     }
 #endif
 
+    LOOP_PHASE(4);  // about to call service->loop()
     service->loop();
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER && defined(HAS_FREE_RTOS) && !defined(ARCH_RP2040)
     if (inputBroker)
@@ -1198,8 +1321,10 @@ void loop()
 #if HAS_SCREEN && ENABLE_MESSAGE_PERSISTENCE
     messageStoreAutosaveTick();
 #endif
+    LOOP_PHASE(5);  // about to call mainController.runOrDelay() — runs OSThreads
     long delayMsec = mainController.runOrDelay();
 
+    LOOP_PHASE(6);  // about to call mainDelay.delay
     // We want to sleep as long as possible here - because it saves power
     if (!runASAP && loopCanSleep()) {
 #ifdef DEBUG_LOOP_TIMING
@@ -1207,5 +1332,6 @@ void loop()
 #endif
         mainDelay.delay(delayMsec);
     }
+    LOOP_PHASE(7);  // end of loop()
 }
 #endif

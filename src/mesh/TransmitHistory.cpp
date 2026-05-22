@@ -208,6 +208,13 @@ uint32_t TransmitHistory::getLastSentToMeshMillis(uint16_t key) const
 
 bool TransmitHistory::saveToDisk()
 {
+#if defined(FREEWILI)
+    // RP2350 SMP + arduino-pico LittleFS hang — same as NodeDB::saveProto.
+    // setLastSentToMesh is called from NodeInfoModule::allocReply before TX,
+    // which makes any NodeInfo broadcast trigger this flash write and hang.
+    dirty = false;
+    return true;
+#endif
     if (!dirty) {
         return true;
     }

@@ -182,6 +182,50 @@ void VirtualKeyboard::draw(OLEDDisplay *display, int16_t offsetX, int16_t offset
             }
         }
     }
+
+    // Cache layout for selectKeyAt() / tap-to-type. keyboardStartY here is the
+    // y-relative-to-screen-origin top of the key grid (already incorporates
+    // offsetY for the 64px branch; the others are absolute).
+    m_lastOffsetY = offsetY;
+    m_lastCellH = cellH;
+    for (int col = 0; col < KEYBOARD_COLS; ++col) {
+        m_lastColX[col] = colX[col];
+        m_lastColW[col] = colW[col];
+    }
+    // For the 64px branch keyboardStartY already includes offsetY; for the
+    // other branches it doesn't. Normalize so m_lastKeyTopY is absolute.
+    if (screenH <= 64)
+        m_lastKeyTopY = keyboardStartY;
+    else
+        m_lastKeyTopY = offsetY + keyboardStartY;
+    m_layoutCached = true;
+}
+
+bool VirtualKeyboard::selectKeyAt(int16_t touchX, int16_t touchY)
+{
+    if (!m_layoutCached || m_lastCellH <= 0)
+        return false;
+    if (touchY < m_lastKeyTopY)
+        return false;  // tap above the keyboard (in input/header area)
+    int row = (touchY - m_lastKeyTopY) / m_lastCellH;
+    if (row < 0 || row >= KEYBOARD_ROWS)
+        return false;
+    int col = -1;
+    for (int c = 0; c < KEYBOARD_COLS; ++c) {
+        if (touchX >= m_lastColX[c] && touchX < m_lastColX[c] + m_lastColW[c]) {
+            col = c;
+            break;
+        }
+    }
+    if (col < 0)
+        return false;
+    const VirtualKey &k = keyboard[row][col];
+    if (k.character == 0 && k.type == VK_CHAR)
+        return false;  // dead cell (some grid positions are empty)
+    cursorRow = (uint8_t)row;
+    cursorCol = (uint8_t)col;
+    resetTimeout();
+    return true;
 }
 
 void VirtualKeyboard::drawInputArea(OLEDDisplay *display, int16_t offsetX, int16_t offsetY, int16_t keyboardStartY)

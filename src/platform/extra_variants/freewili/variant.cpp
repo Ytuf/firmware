@@ -3,19 +3,13 @@
 #ifdef FREEWILI
 
 #include <Wire.h>
-#include <SPI.h>
 #include "hardware/i2c.h"
-#include "hardware/spi.h"
 #include "hardware/gpio.h"
-#include "hardware/sync.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 #include "pico/stdlib.h"
 #include "input/InputBroker.h"
-#include "gps/RTC.h"
-#include "mesh/NodeDB.h"
 #include <time.h>
-#include <sys/time.h>
 
 #define DWT_CTRL    (*(volatile uint32_t*)0xE0001000)
 #define DWT_CYCCNT  (*(volatile uint32_t*)0xE0001004)
@@ -192,16 +186,29 @@ static void ws2812_send_bytes(uint pin, const uint8_t *bytes, uint nbytes) {
 #define IO_EXPANDER_DISPLAY_ADDR 0x23
 #define BQ27441_I2C_ADDR 0x55
 
+// Tracks whether i2c1 has been brought up at 400 kHz with the right pinmux.
+// initIOExpanderPicoSDK() and the BQ27441 read helper both rely on this; the
+// hot-path read defensively re-initializes once if Wire1.begin() in main()
+// reset the bus speed/pinmux between boot init and the first runtime read.
+static bool s_i2c1_inited_400k = false;
+
+static void freewili_i2c1_ensure_400k()
+{
+    if (s_i2c1_inited_400k) return;
+    gpio_set_function(26, GPIO_FUNC_I2C);
+    gpio_set_function(27, GPIO_FUNC_I2C);
+    gpio_pull_up(26);
+    gpio_pull_up(27);
+    i2c_init(i2c1, 400000);
+    s_i2c1_inited_400k = true;
+}
+
 // Arduino Wire's repeated-start path doesn't talk reliably to BQ27441 on this
 // bus, so we use raw pico-sdk i2c1 with tight per-byte timeouts.
 extern "C" bool freewili_bq27441_read_word(uint8_t reg, uint16_t *out)
 {
     if (!out) return false;
-    gpio_set_function(26, GPIO_FUNC_I2C);
-    gpio_set_function(27, GPIO_FUNC_I2C);
-    gpio_pull_up(26);
-    gpio_pull_up(27);
-    i2c_init(i2c1, 100000);
+    freewili_i2c1_ensure_400k();
     for (int attempt = 0; attempt < 2; attempt++) {
         if (i2c_write_timeout_us(i2c1, BQ27441_I2C_ADDR, &reg, 1, true, 5000) < 0) {
             continue;
@@ -249,6 +256,9 @@ extern "C" bool freewili_bq27441_read_word_cached(uint8_t reg, uint16_t *out)
 
 static void initIOExpanderPicoSDK()
 {
+    // Boot-time i2c1 bring-up. Deliberately does NOT mark s_i2c1_inited_400k:
+    // Wire1.begin() runs later in main() and can reset the bus speed, so the
+    // BQ27441 hot path needs to re-assert 400 kHz on its first runtime call.
     i2c_init(i2c1, 400000);
     gpio_set_function(26, GPIO_FUNC_I2C);
     gpio_set_function(27, GPIO_FUNC_I2C);
@@ -269,7 +279,7 @@ static void initIOExpanderPicoSDK()
         0x0C,  // Config Port 0
         0x00,  // all outputs
         0x00,
-        0x02,  // HOTPLUG_DET = input
+        0x02,  // P2_1 (HOTPLUG_DET) reserved as input; not currently read by firmware.
     };
     i2c_write_blocking(i2c1, IO_EXPANDER_DISPLAY_ADDR, cfg_cmd, 4, false);
 
@@ -283,6 +293,11 @@ static void initIOExpanderPicoSDK()
         if (freewili_bq27441_read_word(0x06, &flags))      s_bq27441_flags_cache = flags;
         if (freewili_bq27441_read_word(0x10, &raw_current)) s_bq27441_avgcurrent_cache = (int16_t)raw_current;
     }
+
+    // The early-boot reads above lock s_i2c1_inited_400k. Clear it so the
+    // first runtime read (after Wire1.begin() runs in main()) re-asserts the
+    // 400 kHz speed and the I2C pinmux.
+    s_i2c1_inited_400k = false;
 }
 
 extern "C" {

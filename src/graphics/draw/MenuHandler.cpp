@@ -75,6 +75,12 @@ uint8_t  menuHandler::pendingFreetextChannel = 0;
 bool test_enabled = false;
 uint8_t test_count = 0;
 
+// Channel editor staging buffer. Edits land here until the final Save/Discard
+// step so that backing out of the name/PSK/role flow leaves the live channel
+// untouched.
+static meshtastic_Channel pendingChannel = meshtastic_Channel_init_default;
+static bool pendingChannelValid = false;
+
 void menuHandler::loraMenu()
 {
     static const char *optionsArray[] = {"Back", "Device Role", "Radio Preset", "Frequency Slot", "LoRa Region"};
@@ -230,6 +236,24 @@ void menuHandler::deviceRolePicker()
     bannerOptions.message = "Device Role";
     bannerOptions.optionsArrayPtr = optionsArray;
     bannerOptions.optionsCount = 5;
+    // Highlight the picker entry matching the current role; fall back to the first real option.
+    switch (config.device.role) {
+    case meshtastic_Config_DeviceConfig_Role_CLIENT:
+        bannerOptions.InitialSelected = devicerole_client;
+        break;
+    case meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE:
+        bannerOptions.InitialSelected = devicerole_clientmute;
+        break;
+    case meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND:
+        bannerOptions.InitialSelected = devicerole_lostandfound;
+        break;
+    case meshtastic_Config_DeviceConfig_Role_TRACKER:
+        bannerOptions.InitialSelected = devicerole_tracker;
+        break;
+    default:
+        bannerOptions.InitialSelected = devicerole_client;
+        break;
+    }
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == Back) {
             menuHandler::menuQueue = menuHandler::LoraMenu;
@@ -246,6 +270,7 @@ void menuHandler::deviceRolePicker()
         }
         service->reloadConfig(SEGMENT_CONFIG);
         rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
+        IF_SCREEN(screen->showSimpleBanner("Restart required...", DEFAULT_REBOOT_SECONDS * 1000));
     };
     screen->showOverlayBanner(bannerOptions);
 }
@@ -257,7 +282,8 @@ void menuHandler::FrequencySlotPicker()
     constexpr int MAX_CHANNEL_OPTIONS = 202;
     static const char *optionsArray[MAX_CHANNEL_OPTIONS];
     static int optionsEnumArray[MAX_CHANNEL_OPTIONS];
-    static char channelText[MAX_CHANNEL_OPTIONS - 1][12];
+    // Wider buffer than upstream so we can fit "Slot NN (XXX.XXX MHz)".
+    static char channelText[MAX_CHANNEL_OPTIONS - 1][24];
     int options = 0;
     optionsArray[options] = "Back";
     optionsEnumArray[options++] = Back;
@@ -271,6 +297,8 @@ void menuHandler::FrequencySlotPicker()
                                       : bwCodeToKHz(loraConfig.bandwidth);
 
     uint32_t numChannels = 0;
+    double slotWidth = 0.0;     // MHz, channel-to-channel spacing
+    double slot1Freq = 0.0;     // MHz, center of slot 1 (matches getFreq())
     if (myRegion) {
         // Match RadioInterface::applyModemConfig(): include padding, add spacing in numerator, and use round()
         const double spacing = myRegion->profile->spacing;
@@ -280,6 +308,10 @@ void menuHandler::FrequencySlotPicker()
         const double denominator = spacing + (padding * 2) + channelBandwidthMHz;
         if (denominator > 0.0) {
             numChannels = static_cast<uint32_t>(round(numerator / denominator));
+            // Mirror RadioInterface getFreq formula (line 1047): freq(N) =
+            // freqStart + bw/2000 + padding + N * freqSlotWidth.
+            slotWidth = denominator;
+            slot1Freq = myRegion->freqStart + (bw / 2000.0) + padding + (1.0 * slotWidth);
         } else {
             LOG_WARN("Invalid region configuration: non-positive channel spacing/width");
         }
@@ -292,7 +324,9 @@ void menuHandler::FrequencySlotPicker()
         numChannels = (uint32_t)(MAX_CHANNEL_OPTIONS - 2);
 
     for (uint32_t ch = 1; ch <= numChannels; ch++) {
-        snprintf(channelText[ch - 1], sizeof(channelText[ch - 1]), "Slot %lu", (unsigned long)ch);
+        double freq = slot1Freq + ((double)(ch - 1) * slotWidth);
+        snprintf(channelText[ch - 1], sizeof(channelText[ch - 1]),
+                 "Slot %lu (%.3f MHz)", (unsigned long)ch, freq);
         optionsArray[options] = channelText[ch - 1];
         optionsEnumArray[options++] = (int)ch;
     }
@@ -318,6 +352,11 @@ void menuHandler::FrequencySlotPicker()
 
         config.lora.channel_num = selected;
         service->reloadConfig(SEGMENT_CONFIG);
+        // Reload alone doesn't re-push the radio config to a UART-bridge
+        // radio (the new freq/preset only lands on the next radio init).
+        // Match the DeviceRolePicker pattern and schedule a reboot.
+        rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
+        IF_SCREEN(screen->showSimpleBanner("Restart required...", DEFAULT_REBOOT_SECONDS * 1000));
     };
 
     screen->showOverlayBanner(bannerOptions);
@@ -356,7 +395,18 @@ void menuHandler::radioPresetPicker()
             config.lora.channel_num = 0;        // Reset to default channel for the preset
             config.lora.override_frequency = 0; // Clear any custom frequency
             service->reloadConfig(SEGMENT_CONFIG);
+            rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
+            IF_SCREEN(screen->showSimpleBanner("Restart required...", DEFAULT_REBOOT_SECONDS * 1000));
         });
+
+    int initialSelection = 1; // first real option if no match
+    for (size_t i = 0; i < presetCount; ++i) {
+        if (presetOptions[i].hasValue && presetOptions[i].value == config.lora.modem_preset) {
+            initialSelection = static_cast<int>(i);
+            break;
+        }
+    }
+    bannerOptions.InitialSelected = initialSelection;
 
     screen->showOverlayBanner(bannerOptions);
 }
@@ -369,6 +419,7 @@ void menuHandler::twelveHourPicker()
     bannerOptions.message = "Time Format";
     bannerOptions.optionsArrayPtr = optionsArray;
     bannerOptions.optionsCount = 3;
+    bannerOptions.InitialSelected = config.display.use_12h_clock ? twelve : twentyfour;
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == Back) {
             menuHandler::menuQueue = menuHandler::ClockMenu;
@@ -2442,9 +2493,9 @@ void menuHandler::screenOptionsMenu()
 void menuHandler::powerMenu()
 {
 
-    enum optionsNumbers { Back, Reboot, Shutdown, MUI };
-    static const char *optionsArray[4] = {"Back"};
-    static int optionsEnumArray[4] = {Back};
+    enum optionsNumbers { Back, Reboot, Shutdown, MUI, FactoryReset };
+    static const char *optionsArray[5] = {"Back"};
+    static int optionsEnumArray[5] = {Back};
     int options = 1;
 
     optionsArray[options] = "Reboot";
@@ -2457,6 +2508,12 @@ void menuHandler::powerMenu()
     optionsArray[options] = "Switch to MUI";
     optionsEnumArray[options++] = MUI;
 #endif
+
+    // Placed last so it doesn't share a row with Shutdown — a mistap on the
+    // destructive option should require the user to deliberately reach the
+    // bottom of the menu, then confirm.
+    optionsArray[options] = "Factory Reset";
+    optionsEnumArray[options++] = FactoryReset;
 
     BannerOverlayOptions bannerOptions;
     bannerOptions.message = "Reboot / Shutdown";
@@ -2476,10 +2533,44 @@ void menuHandler::powerMenu()
         } else if (selected == MUI) {
             menuHandler::menuQueue = menuHandler::MuiPicker;
             screen->runNow();
+        } else if (selected == FactoryReset) {
+            menuHandler::menuQueue = menuHandler::FactoryResetMenu;
+            screen->runNow();
         } else {
             menuQueue = SystemBaseMenu;
             screen->runNow();
         }
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::factoryResetMenu()
+{
+    static const char *optionsArray[] = {"No", "Yes"};
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Erase all config\nand channels?";
+    if (currentResolution == ScreenResolution::UltraLow) {
+        bannerOptions.message = "Factory Reset?";
+    }
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 2;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected != 1) {
+            menuHandler::menuQueue = menuHandler::PowerMenu;
+            screen->runNow();
+            return;
+        }
+        LOG_INFO("Initiate factory reset from menu");
+        // Match AdminModule's factory_reset_config_tag behavior: clear config
+        // + module config back to defaults and reboot. NodeDB::factoryReset
+        // handles the live state; reloadConfig pushes the cleared values to
+        // the radio/UI, and the scheduled reboot pulls everything from the
+        // fresh on-disk state.
+        nodeDB->factoryReset();
+        if (service)
+            service->reloadConfig(SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_CHANNELS | SEGMENT_DEVICESTATE);
+        IF_SCREEN(screen->showSimpleBanner("Factory Reset...", DEFAULT_REBOOT_SECONDS * 1000));
+        rebootAtMsec = millis() + DEFAULT_REBOOT_SECONDS * 1000;
     };
     screen->showOverlayBanner(bannerOptions);
 }
@@ -2809,16 +2900,23 @@ void menuHandler::channelEditorMenu()
             }
             if (newSlot < 0) newSlot = (n >= 1) ? 1 : 0;
             editingChannelIndex = newSlot;
-            meshtastic_Channel ch = channels.getByIndex((uint8_t)newSlot);
-            ch.index = newSlot;
-            ch.has_settings = true;
-            memset(ch.settings.name, 0, sizeof(ch.settings.name));
-            ch.settings.psk.size = 0;
-            memset(ch.settings.psk.bytes, 0, sizeof(ch.settings.psk.bytes));
-            ch.role = meshtastic_Channel_Role_DISABLED;
-            channels.setChannel(ch);
+            // Stage a fresh-but-disabled channel in pendingChannel. Nothing
+            // touches the live channel table until the final Save step.
+            pendingChannel = channels.getByIndex((uint8_t)newSlot);
+            pendingChannel.index = newSlot;
+            pendingChannel.has_settings = true;
+            memset(pendingChannel.settings.name, 0, sizeof(pendingChannel.settings.name));
+            pendingChannel.settings.psk.size = 0;
+            memset(pendingChannel.settings.psk.bytes, 0, sizeof(pendingChannel.settings.psk.bytes));
+            pendingChannel.role = meshtastic_Channel_Role_DISABLED;
+            pendingChannelValid = true;
         } else {
             editingChannelIndex = slot;
+            // Snapshot the live channel; subsequent steps mutate pendingChannel only.
+            pendingChannel = channels.getByIndex((uint8_t)slot);
+            pendingChannel.index = slot;
+            pendingChannel.has_settings = true;
+            pendingChannelValid = true;
         }
         menuHandler::menuQueue = menuHandler::ChannelEditNameMenu;
         screen->runNow();
@@ -2828,16 +2926,16 @@ void menuHandler::channelEditorMenu()
 
 void menuHandler::channelEditNameMenu()
 {
-    if (editingChannelIndex < 0) return;
-    meshtastic_Channel &ch = channels.getByIndex((uint8_t)editingChannelIndex);
-    screen->showTextInput("Channel Name", ch.settings.name, 60000,
+    if (editingChannelIndex < 0 || !pendingChannelValid) return;
+    // Seed the text input with the staged name (which starts as the live name
+    // for existing slots and empty for new slots).
+    screen->showTextInput("Channel Name", pendingChannel.settings.name, 60000,
                           [](const std::string &text) {
-                              if (editingChannelIndex < 0) return;
-                              meshtastic_Channel ch = channels.getByIndex((uint8_t)editingChannelIndex);
-                              strncpy(ch.settings.name, text.c_str(), sizeof(ch.settings.name) - 1);
-                              ch.settings.name[sizeof(ch.settings.name) - 1] = '\0';
-                              ch.has_settings = true;
-                              channels.setChannel(ch);
+                              if (editingChannelIndex < 0 || !pendingChannelValid) return;
+                              strncpy(pendingChannel.settings.name, text.c_str(),
+                                      sizeof(pendingChannel.settings.name) - 1);
+                              pendingChannel.settings.name[sizeof(pendingChannel.settings.name) - 1] = '\0';
+                              pendingChannel.has_settings = true;
                               menuHandler::menuQueue = menuHandler::ChannelEditPskMenu;
                               screen->runNow();
                           });
@@ -2845,23 +2943,21 @@ void menuHandler::channelEditNameMenu()
 
 void menuHandler::channelEditPskMenu()
 {
-    if (editingChannelIndex < 0) return;
+    if (editingChannelIndex < 0 || !pendingChannelValid) return;
     screen->showTextInput(
         "Passphrase (blank=public)", "", 60000, [](const std::string &text) {
-            if (editingChannelIndex < 0) return;
-            meshtastic_Channel ch = channels.getByIndex((uint8_t)editingChannelIndex);
+            if (editingChannelIndex < 0 || !pendingChannelValid) return;
             // Passphrase → 16-byte AES128 PSK; empty = public (size 0).
-            memset(ch.settings.psk.bytes, 0, sizeof(ch.settings.psk.bytes));
+            memset(pendingChannel.settings.psk.bytes, 0, sizeof(pendingChannel.settings.psk.bytes));
             if (text.empty()) {
-                ch.settings.psk.size = 0;
+                pendingChannel.settings.psk.size = 0;
             } else {
                 size_t n = text.size();
                 if (n > 16) n = 16;
-                memcpy(ch.settings.psk.bytes, text.data(), n);
-                ch.settings.psk.size = 16;
+                memcpy(pendingChannel.settings.psk.bytes, text.data(), n);
+                pendingChannel.settings.psk.size = 16;
             }
-            ch.has_settings = true;
-            channels.setChannel(ch);
+            pendingChannel.has_settings = true;
             menuHandler::menuQueue = menuHandler::ChannelEditRoleMenu;
             screen->runNow();
         });
@@ -2875,17 +2971,42 @@ void menuHandler::channelEditRoleMenu()
     bannerOptions.message = "Channel Role";
     bannerOptions.optionsArrayPtr = labels;
     bannerOptions.optionsCount = 4;
+    // Pre-highlight the role the staged channel currently has.
+    if (pendingChannelValid) {
+        switch (pendingChannel.role) {
+        case meshtastic_Channel_Role_DISABLED:
+            bannerOptions.InitialSelected = Disabled;
+            break;
+        case meshtastic_Channel_Role_SECONDARY:
+            bannerOptions.InitialSelected = Secondary;
+            break;
+        case meshtastic_Channel_Role_PRIMARY:
+            bannerOptions.InitialSelected = Primary;
+            break;
+        default:
+            bannerOptions.InitialSelected = Disabled;
+            break;
+        }
+    } else {
+        bannerOptions.InitialSelected = Disabled;
+    }
     bannerOptions.bannerCallback = [](int selected) -> void {
-        if (editingChannelIndex < 0) return;
+        if (editingChannelIndex < 0 || !pendingChannelValid) return;
         if (selected == Back) return;
-        meshtastic_Channel ch = channels.getByIndex((uint8_t)editingChannelIndex);
-        if (selected == Disabled) ch.role = meshtastic_Channel_Role_DISABLED;
-        else if (selected == Secondary) ch.role = meshtastic_Channel_Role_SECONDARY;
-        else if (selected == Primary) ch.role = meshtastic_Channel_Role_PRIMARY;
-        ch.has_settings = true;
-        channels.setChannel(ch);
-        if (service) service->reloadConfig(SEGMENT_CHANNELS);
-        editingChannelIndex = -1;
+        if (selected == Disabled) pendingChannel.role = meshtastic_Channel_Role_DISABLED;
+        else if (selected == Secondary) pendingChannel.role = meshtastic_Channel_Role_SECONDARY;
+        else if (selected == Primary) pendingChannel.role = meshtastic_Channel_Role_PRIMARY;
+        pendingChannel.has_settings = true;
+        // Final confirmation: commit staged edits to the live channel table
+        // (Yes) or quietly drop them (No). Backing out of any earlier step
+        // never reaches here, so the live channel is untouched.
+        showConfirmationBanner("Save channel changes?", []() {
+            if (editingChannelIndex < 0 || !pendingChannelValid) return;
+            channels.setChannel(pendingChannel);
+            if (service) service->reloadConfig(SEGMENT_CHANNELS);
+            editingChannelIndex = -1;
+            pendingChannelValid = false;
+        });
     };
     screen->showOverlayBanner(bannerOptions);
 }
@@ -3089,6 +3210,9 @@ void menuHandler::handleMenuSwitch(OLEDDisplay *display)
         break;
     case PowerMenu:
         powerMenu();
+        break;
+    case FactoryResetMenu:
+        factoryResetMenu();
         break;
     case FrameToggles:
         frameTogglesMenu();

@@ -64,7 +64,8 @@ class menuHandler
         ChannelEditNameMenu,
         ChannelEditPskMenu,
         ChannelEditRoleMenu,
-        FreetextLaunchMenu
+        FreetextLaunchMenu,
+        FactoryResetMenu
     };
     static screenMenus menuQueue;
     static uint32_t pickedNodeNum; // node selected by NodePicker for ManageNodeMenu
@@ -115,6 +116,7 @@ class menuHandler
     static void wifiToggleMenu();
     static void screenOptionsMenu();
     static void powerMenu();
+    static void factoryResetMenu();
     static void nodeNameLengthMenu();
     static void frameTogglesMenu();
     static void displayUnitsMenu();

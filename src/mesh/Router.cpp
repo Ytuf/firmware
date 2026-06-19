@@ -442,8 +442,9 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p)
         return DecodeState::DECODE_FAILURE;
     }
 
-    if (p->which_payload_variant == meshtastic_MeshPacket_decoded_tag)
+    if (p->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
         return DecodeState::DECODE_SUCCESS; // If packet was already decoded just return
+    }
 
     size_t rawSize = p->encrypted.size;
     if (rawSize > sizeof(bytes)) {
@@ -590,7 +591,6 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p)
 meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
 {
     concurrency::LockGuard g(cryptLock);
-
     int16_t hash;
 
     // If the packet is not yet encrypted, do so now
@@ -638,8 +638,9 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
             }
         } */
 
-        if (numbytes + MESHTASTIC_HEADER_LENGTH > MAX_LORA_PAYLOAD_LEN)
+        if (numbytes + MESHTASTIC_HEADER_LENGTH > MAX_LORA_PAYLOAD_LEN) {
             return meshtastic_Routing_Error_TOO_LARGE;
+        }
 
         // printBytes("plaintext", bytes, numbytes);
 
@@ -666,8 +667,9 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
             p->decoded.portnum != meshtastic_PortNum_TRACEROUTE_APP && p->decoded.portnum != meshtastic_PortNum_NODEINFO_APP &&
             p->decoded.portnum != meshtastic_PortNum_ROUTING_APP && p->decoded.portnum != meshtastic_PortNum_POSITION_APP) {
             LOG_DEBUG("Use PKI!");
-            if (numbytes + MESHTASTIC_HEADER_LENGTH + MESHTASTIC_PKC_OVERHEAD > MAX_LORA_PAYLOAD_LEN)
+            if (numbytes + MESHTASTIC_HEADER_LENGTH + MESHTASTIC_PKC_OVERHEAD > MAX_LORA_PAYLOAD_LEN) {
                 return meshtastic_Routing_Error_TOO_LARGE;
+            }
             // Check for a known public key for the destination
             if (node == nullptr || node->user.public_key.size != 32) {
                 LOG_WARN("Unknown public key for destination node 0x%08x (portnum %d), refusing to send legacy DM", p->to,

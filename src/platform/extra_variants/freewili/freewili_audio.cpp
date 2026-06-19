@@ -5,9 +5,7 @@
 #include <Wire.h>
 #include "hardware/pwm.h"
 #include "hardware/gpio.h"
-#include "hardware/pio.h"
 #include "hardware/clocks.h"
-#include <math.h>
 
 #include "freewili_audio.h"
 
@@ -16,11 +14,8 @@ volatile uint8_t  g_audio_init_status     __attribute__((used)) = 0;  // 0=untri
 volatile uint32_t g_audio_tone_count      __attribute__((used)) = 0;
 volatile uint32_t g_audio_samples_pushed  __attribute__((used)) = 0;
 volatile uint32_t g_audio_samples_dropped __attribute__((used)) = 0;
-volatile uint32_t g_audio_pio_pc          __attribute__((used)) = 0;
 volatile uint32_t g_audio_sys_clk_hz      __attribute__((used)) = 0;
 volatile uint32_t g_audio_pwm_wrap        __attribute__((used)) = 0;
-volatile uint32_t g_audio_pio_clkdiv      __attribute__((used)) = 0;
-volatile int32_t  g_audio_pio_offset      __attribute__((used)) = -1;
 }
 
 static constexpr uint8_t  CODEC_I2C_ADDR = 0x1A;
@@ -31,21 +26,6 @@ static constexpr uint8_t  PIN_I2S_BCLK = 7;
 static constexpr uint8_t  PIN_SPK_MCLK = 22;
 static constexpr uint32_t SAMPLE_RATE  = 8000;
 
-// PIO I2S program from stock FW (rmpLib/rpI2S.cpp). Unused at runtime — bit-bang
-// is the active path because the codec wouldn't lock on PIO-generated streams.
-static const uint16_t kFwI2sProgram[] = {
-    0x6801, 0x1840, 0x6001, 0xf02e,
-    0x6001, 0x1044, 0x6801, 0xf82e,
-};
-static const struct pio_program kFwI2sPioProgram = {
-    .instructions = kFwI2sProgram,
-    .length = 8,
-    .origin = -1,
-};
-
-static PIO  s_pio    = nullptr;
-static int  s_sm     = -1;
-static int  s_offset = -1;
 static bool s_audio_ready = false;
 
 // NAU88C10 register: 7-bit address + 9-bit value packed into 2 I2C bytes.
@@ -160,53 +140,6 @@ extern "C" bool freewili_audio_init(void)
 
     s_audio_ready = true;
     g_audio_init_status = 1;
-    return true;
-}
-
-// PIO0 SM1 I2S setup. Pads drive correctly per SWD but the codec doesn't lock
-// to the output stream — left here as a starting point for revisiting PIO.
-static bool ensure_i2s_started()
-{
-    if (s_pio) return true;
-    s_pio = pio0;
-    pio_set_gpio_base(s_pio, 0);
-    s_sm = pio_claim_unused_sm(s_pio, false);
-    if (s_sm < 0) return false;
-    s_offset = pio_add_program(s_pio, &kFwI2sPioProgram);
-    if (s_offset < 0) { pio_sm_unclaim(s_pio, s_sm); s_pio = nullptr; return false; }
-    g_audio_pio_offset = s_offset;
-
-    pio_sm_config c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c, s_offset, s_offset + 7);
-    sm_config_set_sideset(&c, 2, false, false);
-    sm_config_set_out_pins(&c, PIN_I2S_DOUT, 1);
-    sm_config_set_sideset_pins(&c, PIN_I2S_LRCK);
-    sm_config_set_out_shift(&c, false, true, 32);
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-    uint32_t divider = sys_clk * 4u / SAMPLE_RATE;
-    g_audio_pio_clkdiv = divider >> 8;
-    sm_config_set_clkdiv_int_frac(&c, divider >> 8, 0);
-
-    pio_gpio_init(s_pio, PIN_I2S_LRCK);
-    pio_gpio_init(s_pio, PIN_I2S_BCLK);
-    pio_gpio_init(s_pio, PIN_I2S_DOUT);
-    // RP2350 PADS bit 8 = ISO (pad isolation). Some SDK paths leave it set.
-    constexpr uintptr_t kPadsBank0Base = 0x40038000u;
-    auto pad_clear_iso = [](uint pin) {
-        volatile uint32_t *pad =
-            (volatile uint32_t *)(kPadsBank0Base + 4u + 4u * pin);
-        *pad = (*pad & ~((1u << 7) | (1u << 8))) | (1u << 6);
-    };
-    pad_clear_iso(PIN_I2S_LRCK);
-    pad_clear_iso(PIN_I2S_BCLK);
-    pad_clear_iso(PIN_I2S_DOUT);
-
-    pio_sm_init(s_pio, s_sm, s_offset, &c);
-
-    uint pin_mask = (1u << PIN_I2S_DOUT) | (3u << PIN_I2S_LRCK);
-    pio_sm_set_pindirs_with_mask(s_pio, s_sm, pin_mask, pin_mask);
-
-    pio_sm_set_enabled(s_pio, s_sm, true);
     return true;
 }
 

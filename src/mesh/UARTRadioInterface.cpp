@@ -102,11 +102,11 @@ bool UARTRadioInterface::init()
     sendCommand(CMD_RADIO_SET_DIO, dioPayload, DIO_PAYLOAD_SIZE);
     delay(10);
 
-    sendRadioConfig();
+    // RadioInterface::init() above called applyModemConfig() which populated savedFreq/sf/bw/cr.
+    sendRadioConfig((uint32_t)(getFreq() * 1e6f));
     delay(10);
 
     sendCommand(CMD_RADIO_RX_START);
-    receiving = true;
 
     LOG_INFO("UARTRadioInterface: init complete, receiving");
 #else
@@ -136,6 +136,8 @@ ErrorCode UARTRadioInterface::send(meshtastic_MeshPacket *p)
 
     sendCommand(CMD_RADIO_TX, (const uint8_t *)&radioBuffer, totalLen);
     txPending = true;
+    extern uint32_t g_uart_tx_start_ms;
+    g_uart_tx_start_ms = millis();
 
 #if defined(FREEWILI)
     freewili_led_pulse_all(28, 10, 0, 40);
@@ -149,11 +151,10 @@ bool UARTRadioInterface::reconfigure()
 {
     RadioInterface::reconfigure();
 
-    sendRadioConfig();
+    sendRadioConfig((uint32_t)(getFreq() * 1e6f));
     delay(10);
 
     sendCommand(CMD_RADIO_RX_START);
-    receiving = true;
 
     LOG_INFO("UARTRadioInterface: reconfigured");
     return true;
@@ -223,14 +224,55 @@ volatile uint32_t g_uart_crc_fail_count     __attribute__((used)) = 0;
 volatile uint32_t g_uart_payload_oversize   __attribute__((used)) = 0;
 volatile uint8_t  g_uart_last_byte          __attribute__((used)) = 0;
 
+// TX watchdog: if RSP_TX_DONE never arrives, clear latched txPending after 5 s.
+volatile uint32_t g_tx_timeout_count        __attribute__((used)) = 0;
+uint32_t          g_uart_tx_start_ms                              = 0;
+
+// Command ACK watchdog: track last command sent so we can detect silent drops.
+volatile uint32_t g_cmd_timeout_count       __attribute__((used)) = 0;
+volatile uint32_t g_cmd_ack_mismatch_count  __attribute__((used)) = 0;
+static   uint8_t  s_last_cmd_sent                                 = 0;
+static   uint32_t s_last_cmd_sent_ms                              = 0;
+
+void UARTRadioInterface::ensureUartPins()
+{
+#if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN)
+#if defined(ARCH_RP2040) && defined(FREEWILI)
+    // FIXME: papering over an unknown GPIO clobber - investigate. Some other driver
+    // resets GPIO 40/23 to GPIO_FUNC_NULL after init; without these re-asserts the
+    // bridge UART goes silent mid-operation. See 2026 firmware audit task U5.
+    gpio_set_function(UART_RADIO_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RADIO_RX_PIN, GPIO_FUNC_UART_AUX);
+#endif
+#endif
+}
+
 void UARTRadioInterface::processUART()
 {
     g_processUART_count++;
 #if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN)
-#if defined(ARCH_RP2040) && defined(FREEWILI)
-    gpio_set_function(UART_RADIO_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(UART_RADIO_RX_PIN, GPIO_FUNC_UART_AUX);
-#endif
+    ensureUartPins();
+
+    // TX watchdog: a missed RSP_TX_DONE would otherwise latch txPending forever,
+    // blocking future sends and pinning canSleep() at false.
+    if (txPending && (millis() - g_uart_tx_start_ms) > 5000) {
+        LOG_WARN("UARTRadioInterface: TX timeout (5s), clearing latched txPending");
+        g_tx_timeout_count++;
+        txPending = false;
+        if (sendingPacket) {
+            packetPool.release(sendingPacket);
+            sendingPacket = NULL;
+        }
+        sendCommand(CMD_RADIO_RX_START);
+    }
+
+    // Command ACK watchdog: bridge can silently drop CMDs; log + clear so a future
+    // fix can decide retry policy without runaway loops.
+    if (s_last_cmd_sent != 0 && (millis() - s_last_cmd_sent_ms) > 2000) {
+        LOG_WARN("UARTRadioInterface: cmd 0x%02x not ACKed within 2s", s_last_cmd_sent);
+        s_last_cmd_sent = 0;
+        g_cmd_timeout_count++;
+    }
 
     bool gotAny = false;
 #if defined(ARCH_RP2040) && defined(FREEWILI)
@@ -260,7 +302,7 @@ void UARTRadioInterface::processUART()
             dioPayload[DIO_RF_SWITCH_OFFSET] = 1;
             dioPayload[DIO_TCXO_OFFSET] = 18;
             sendCommand(CMD_RADIO_SET_DIO, dioPayload, DIO_PAYLOAD_SIZE);
-            sendRadioConfig();
+            sendRadioConfig((uint32_t)(getFreq() * 1e6f));
             sendCommand(CMD_RADIO_RX_START);
         }
     }
@@ -334,13 +376,14 @@ extern volatile uint32_t g_sendCommand_count;
 void UARTRadioInterface::sendCommand(uint8_t cmd, const uint8_t *payload, uint16_t len)
 {
     g_sendCommand_count++;
+    // Track last command for the ACK watchdog in processUART().
+    s_last_cmd_sent    = cmd;
+    s_last_cmd_sent_ms = millis();
 #if defined(UART_RADIO_TX_PIN) && defined(UART_RADIO_RX_PIN)
     uint8_t frameBuf[UART_RADIO_HEADER_SIZE + UART_RADIO_MAX_PAYLOAD + UART_RADIO_CRC_SIZE];
     uint16_t frameLen = uart_proto_build_frame(frameBuf, cmd, payload, len);
 #if defined(ARCH_RP2040) && defined(FREEWILI)
-    // Re-assert pin functions before TX; something resets GPIO 40 to NULL.
-    gpio_set_function(UART_RADIO_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(UART_RADIO_RX_PIN, GPIO_FUNC_UART_AUX);
+    ensureUartPins();
     uart_write_blocking(uart1, frameBuf, frameLen);
 #else
     RADIO_SERIAL.write(frameBuf, frameLen);
@@ -349,14 +392,14 @@ void UARTRadioInterface::sendCommand(uint8_t cmd, const uint8_t *payload, uint16
 #endif
 }
 
-void UARTRadioInterface::sendRadioConfig()
+void UARTRadioInterface::sendRadioConfig(uint32_t freqHz)
 {
     g_diag_sendcfg_calls++;
     uint8_t cfgPayload[CFG_PAYLOAD_SIZE];
     memset(cfgPayload, 0, sizeof(cfgPayload));
 
-    // Hardcoded — applyModemConfig races with initLoRa and getFreq() returns stale value.
-    uint32_t freqHz = 906875000u;  // 906.875 MHz, LongFast US slot 19
+    // Caller must have run applyModemConfig() so savedFreq/sf/bw/cr are populated,
+    // then pass (uint32_t)(getFreq() * 1e6f) here.
     g_diag_freqhz_at_cast = freqHz;
     cfgPayload[CFG_FREQ_OFFSET + 0] = (freqHz >> 24) & 0xFF;
     cfgPayload[CFG_FREQ_OFFSET + 1] = (freqHz >> 16) & 0xFF;
@@ -400,9 +443,19 @@ void UARTRadioInterface::sendRadioConfig()
 void UARTRadioInterface::handleResponse(uint8_t cmd, const uint8_t *payload, uint16_t len)
 {
     switch (cmd) {
-    case RSP_ACK:
-        LOG_DEBUG("UARTRadio: ACK received");
+    case RSP_ACK: {
+        // Bridge ACK payload is [original_cmd, status]. Match against the last
+        // command we sent so a missing ACK can be detected by the watchdog.
+        uint8_t originalCmd = (len >= 1) ? payload[0] : 0;
+        if (s_last_cmd_sent != 0 && originalCmd == s_last_cmd_sent) {
+            s_last_cmd_sent = 0;
+        } else if (s_last_cmd_sent != 0) {
+            g_cmd_ack_mismatch_count++;
+            LOG_WARN("UARTRadio: ACK mismatch (got cmd=0x%02x, expected 0x%02x)", originalCmd, s_last_cmd_sent);
+        }
+        LOG_DEBUG("UARTRadio: ACK received (cmd=0x%02x)", originalCmd);
         break;
+    }
 
     case RSP_TX_DONE: {
         LOG_DEBUG("UARTRadio: TX done");
@@ -419,7 +472,6 @@ void UARTRadioInterface::handleResponse(uint8_t cmd, const uint8_t *payload, uin
         }
 
         sendCommand(CMD_RADIO_RX_START);
-        receiving = true;
         break;
     }
 

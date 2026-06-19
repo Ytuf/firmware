@@ -31,12 +31,12 @@ class UARTRadioInterface : public RadioInterface
     uint8_t rxPayload[UART_RADIO_MAX_PAYLOAD];
 
     bool txPending = false;
-    bool receiving = false;
     bool bridgeAlive = false;
     uint32_t lastReinitMs = 0;
 
     void sendCommand(uint8_t cmd, const uint8_t *payload = nullptr, uint16_t len = 0);
-    void sendRadioConfig();
+    void sendRadioConfig(uint32_t freqHz);
+    void ensureUartPins();
     void handleResponse(uint8_t cmd, const uint8_t *payload, uint16_t len);
     void parseByte(uint8_t byte);
 };

@@ -54,6 +54,13 @@
 #include <utility/bonding.h>
 #endif
 
+#if defined(FREEWILI) && defined(FW2_PER_UNIT_KEYPAIR)
+// pico-sdk header for the 64-bit factory-unique chip ID exposed by
+// pico_get_unique_board_id(). Guarded so non-FreeWili (and dev FW2 builds
+// that keep the fixed dev privkey) don't pull this in.
+#include "pico/unique_id.h"
+#endif
+
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WIFI
 #include <MeshtasticOTA.h>
 #endif
@@ -291,9 +298,27 @@ NodeDB::NodeDB()
     // the trap by pinning a build-time keypair. Bump the bytes below to roll
     // the identity (effectively a "rotate keys" operation).
     //
-    // WARNING: this is a public, well-known privkey. Anyone with this firmware
-    // can decrypt DMs sent to this device. Acceptable for dev; replace before
-    // any real deployment.
+    // WARNING: the FW2_FIXED_PRIVKEY path below ships a public, well-known
+    // privkey. Anyone with this firmware can decrypt DMs sent to this device.
+    // Acceptable for dev; production builds MUST define FW2_PER_UNIT_KEYPAIR
+    // (see the freewili-production variant) to derive a distinct keypair from
+    // the RP2350 factory-unique chip ID instead.
+#if defined(FW2_PER_UNIT_KEYPAIR)
+    // Derive privkey from the RP2350's factory-guaranteed unique 64-bit
+    // board ID. Each unit gets a deterministic but distinct keypair without
+    // standing up per-unit factory provisioning infrastructure (no secret
+    // injection step, no per-device build, no key escrow). Curve25519 will
+    // clamp whatever bytes we hand it, so any reasonable 8 -> 32 expansion
+    // works as the seed; we avoid pulling in a real SHA dependency by using
+    // a simple repeated-XOR expansion of the 8 UID bytes.
+    pico_unique_board_id_t uid;
+    pico_get_unique_board_id(&uid);
+    uint8_t seed[32];
+    for (int i = 0; i < 32; i++) {
+        seed[i] = uid.id[i % 8] ^ (uint8_t)(i * 0xA7); // arbitrary const, unique-per-unit
+    }
+    memcpy(config.security.private_key.bytes, seed, 32);
+#else
     static const uint8_t FW2_FIXED_PRIVKEY[32] = {
         0xfc, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
         0x1f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
@@ -301,6 +326,7 @@ NodeDB::NodeDB()
         0x3f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
     };
     memcpy(config.security.private_key.bytes, FW2_FIXED_PRIVKEY, 32);
+#endif
     config.security.private_key.size = 32;
     // Derive the matching pubkey HERE. The region-gated keygen block below
     // skips when config.lora.region == UNSET, which is "true on every boot"
@@ -1186,7 +1212,16 @@ void NodeDB::pickNewNodeNum()
         // pubkey (from before the build-time keypair landed above) see us as
         // an entirely new node and accept the NodeInfo fresh. Bump this XOR
         // constant alongside FW2_FIXED_PRIVKEY when you want to roll identity.
+        //
+        // Production (per-unit keypair) builds use a distinct XOR constant so
+        // that a dev and a production unit on the same MAC space don't collide
+        // nodeNum, and so peers see the production identity as a fresh node
+        // independent of any cached dev pubkey.
+#if defined(FW2_PER_UNIT_KEYPAIR)
+        nodeNum ^= 0xC0FFEE00u;
+#else
         nodeNum ^= 0xFEED0001u;
+#endif
 #endif
     }
 

@@ -267,11 +267,60 @@ NodeDB::NodeDB()
         config.security.is_managed = config.device.is_managed;
     }
 
+#if defined(FREEWILI)
+    // Persistence stub at NodeDB.cpp:1439 means channel_num resets to 0 (auto)
+    // on every boot, which derives to slot 17 (906.375 MHz) on US LongFast.
+    // Hardcode slot 19 (906.875 MHz) so we match the tdeck-class peers that
+    // also live on slot 19 by convention. Change here when you rotate slot.
+    if (config.lora.channel_num == 0) {
+        config.lora.channel_num = 19;
+    }
+#endif
+
 #if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN || MESHTASTIC_EXCLUDE_PKI)
+
+#if defined(FREEWILI)
+    // The FREEWILI persistence stub at NodeDB.cpp:1439 means a fresh keypair
+    // gets minted on every boot. Peers (esp. lilygo tdeck class clients with no
+    // "forget node" UI) lock the very first pubkey they see and reject all
+    // future NodeInfo from us as "Public Key mismatch, dropping NodeInfo"
+    // (NodeDB.cpp:1903). Once that happens, DMs break in both directions and
+    // the only recovery is a hard reset of the peer's nodeDB.
+    //
+    // Until the SD UART API lands and saveProto persists for real, we sidestep
+    // the trap by pinning a build-time keypair. Bump the bytes below to roll
+    // the identity (effectively a "rotate keys" operation).
+    //
+    // WARNING: this is a public, well-known privkey. Anyone with this firmware
+    // can decrypt DMs sent to this device. Acceptable for dev; replace before
+    // any real deployment.
+    static const uint8_t FW2_FIXED_PRIVKEY[32] = {
+        0xfc, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+        0x1f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+        0x2f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+        0x3f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+    };
+    memcpy(config.security.private_key.bytes, FW2_FIXED_PRIVKEY, 32);
+    config.security.private_key.size = 32;
+    // Derive the matching pubkey HERE. The region-gated keygen block below
+    // skips when config.lora.region == UNSET, which is "true on every boot"
+    // with the persistence stub - leaving public_key.size = 0 and silently
+    // breaking ALL PKI (encrypt setDH fails, peers send PKI_UNKNOWN_PUBKEY
+    // NAKs back, incoming DMs get dropped because our self_has_pubkey check
+    // in Router.cpp:458 sees size=0). Also write into owner.public_key so
+    // outgoing NodeInfo broadcasts include it.
+    crypto->regeneratePublicKey(config.security.public_key.bytes, config.security.private_key.bytes);
+    config.security.public_key.size = 32;
+    owner.public_key.size = 32;
+    memcpy(owner.public_key.bytes, config.security.public_key.bytes, 32);
+    keyIsLowEntropy = false;
+#endif
 
     if (!owner.is_licensed && config.lora.region != meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
         bool keygenSuccess = false;
+#if !defined(FREEWILI)
         keyIsLowEntropy = checkLowEntropyPublicKey(config.security.public_key);
+#endif
         if (config.security.private_key.size == 32 && !keyIsLowEntropy) {
             if (crypto->regeneratePublicKey(config.security.public_key.bytes, config.security.private_key.bytes)) {
                 keygenSuccess = true;
@@ -1132,6 +1181,13 @@ void NodeDB::pickNewNodeNum()
     if (nodeNum == 0) {
         // Pick an initial nodenum based on the macaddr
         nodeNum = (ourMacAddr[2] << 24) | (ourMacAddr[3] << 16) | (ourMacAddr[4] << 8) | ourMacAddr[5];
+#if defined(FREEWILI)
+        // Shift to a fresh identity so peers that already cached a stale FW2
+        // pubkey (from before the build-time keypair landed above) see us as
+        // an entirely new node and accept the NodeInfo fresh. Bump this XOR
+        // constant alongside FW2_FIXED_PRIVKEY when you want to roll identity.
+        nodeNum ^= 0xFEED0001u;
+#endif
     }
 
     meshtastic_NodeInfoLite *found;

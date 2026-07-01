@@ -106,12 +106,14 @@ extern FreeWiliTusbRingLog g_freewiliTusbLog;
 // hub + full-speed device config descriptor.
 #define CFG_TUH_ENUMERATION_BUFSIZE 512
 
-// The u-blox sits BEHIND the on-board hub — hub support is mandatory.
-// MUST be >= 2: the FW2 hub topology is CASCADED (the CH334F at the root has
-// ANOTHER hub-class device on its port 1 feeding the USB-A ports). Each hub
-// needs its own address slot; with 1, the second tier fails enumeration at
+// The u-blox sits BEHIND two hub tiers — hub support is mandatory and MUST
+// be >= 2: tier 1 is the on-board CH334F (VID 1A86 PID 8091; D1/D2 wired to
+// the USB-A jacks), tier 2 is a hub INSIDE the Intrepid GPS dongle itself
+// (class-09 device on the CH334F port, u-blox CDC behind it). Each hub needs
+// its own address slot; with 1, the dongle's hub fails enumeration at
 // usbh.c:1577 `TU_ASSERT(new_addr != 0)` (verified via the RAM log 2026-07-01)
 // and nothing plugged into USB-A can ever mount. 3 = one slot of headroom.
+// Documented in ../freewili-firmware/agents/hardware/usb-topology.md.
 #define CFG_TUH_HUB 3
 
 // Devices (excluding hubs). Reference uses 4.

@@ -17,6 +17,7 @@
 
 #include "freewili_usb_host.h"
 
+#include "../freewili_gps.h"
 #include "Adafruit_TinyUSB.h"
 
 // GDB-observable state.
@@ -66,6 +67,8 @@ void freewiliUsbHostService(void)
         if (n > 0) {
             buf[n] = 0;
             g_freewili_gps_nmea_bytes += (uint32_t)n;
+            // Task 2/4: parse + inject into NodeDB (map + position broadcasts).
+            freewiliGpsFeed(buf, (size_t)n);
             // Raw NMEA bytes ($GNRMC/$GNGGA/...). Trailing CR/LF included.
             LOG_INFO("FreeWili GPS NMEA: %s", (const char *)buf);
         }
@@ -105,6 +108,7 @@ void tuh_cdc_umount_cb(uint8_t idx)
 {
     s_gps_cdc_mounted = false;
     SerialGps.umount(idx);
+    freewiliGpsResetFix(); // Task 6: UI degrades to node-list w/o local fix
     LOG_INFO("FreeWili USB CDC unmounted: idx %u\n", idx);
 }
 

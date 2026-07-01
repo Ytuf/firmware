@@ -32,6 +32,13 @@ static Adafruit_USBH_Host USBHost;
 // CDC-host endpoint bound to the first mounted CDC interface (the GPS).
 static Adafruit_USBH_CDC SerialGps;
 
+// True only between tuh_cdc_mount_cb and tuh_cdc_umount_cb. Touching
+// SerialGps while unmounted passes TUSB_INDEX_INVALID into tuh_cdc_*,
+// whose TU_ASSERT executes a BKPT whenever a debugger has been attached
+// since power-on (DHCSR.C_DEBUGEN latches) — halting core0 on every
+// loop() pass. Gate all CDC access on this flag.
+static volatile bool s_gps_cdc_mounted = false;
+
 void freewiliUsbHostInit(void)
 {
     // Bring up the TinyUSB host stack on the native controller (rhport 0).
@@ -53,7 +60,7 @@ void freewiliUsbHostService(void)
 
     // Drain the GPS CDC stream and log raw NMEA. tuh_cdc_rx_cb queues bytes;
     // we read them here on the main loop so the ISR/callback stays short.
-    if (SerialGps.connected()) {
+    if (s_gps_cdc_mounted && SerialGps.connected()) {
         uint8_t buf[64];
         int n = SerialGps.read(buf, sizeof(buf) - 1);
         if (n > 0) {
@@ -90,11 +97,13 @@ void tuh_cdc_mount_cb(uint8_t idx)
 {
     SerialGps.mount(idx);
     g_freewili_gps_mount_count++;
+    s_gps_cdc_mounted = true;
     LOG_INFO("FreeWili USB CDC mounted: idx %u (GPS)\n", idx);
 }
 
 void tuh_cdc_umount_cb(uint8_t idx)
 {
+    s_gps_cdc_mounted = false;
     SerialGps.umount(idx);
     LOG_INFO("FreeWili USB CDC unmounted: idx %u\n", idx);
 }

@@ -46,8 +46,28 @@ extern "C" {
 #define CFG_TUSB_OS OPT_OS_PICO
 #endif
 
+// Spike diagnostics: TinyUSB logs go to a RAM ring buffer (no console in host
+// mode) — see usbhost/freewili_tusb_log.cpp; dump g_freewili_tusb_log over SWD.
+// Level 2 traces every enumeration step/transfer result. Set back to 0 when done.
+//
+// Defining CFG_TUSB_DEBUG_PRINTF makes Adafruit_TinyUSB_API.cpp emit the
+// function DEFINITION itself, writing to SERIAL_TUSB_DEBUG (default Serial1 —
+// a real UART we must not drive). Point SERIAL_TUSB_DEBUG at a ring-buffer
+// object instead of defining the printf ourselves (that would double-define).
 #ifndef CFG_TUSB_DEBUG
-#define CFG_TUSB_DEBUG 0
+#define CFG_TUSB_DEBUG 2
+#endif
+#define CFG_TUSB_DEBUG_PRINTF freewili_tusb_ram_printf
+#ifdef __cplusplus
+#include <stddef.h> /* size_t — this header is included before any libc header */
+class FreeWiliTusbRingLog
+{
+  public:
+    void begin(unsigned long) {}
+    size_t write(const char *s);
+};
+extern FreeWiliTusbRingLog g_freewiliTusbLog;
+#define SERIAL_TUSB_DEBUG g_freewiliTusbLog
 #endif
 
 #define CFG_TUSB_MEM_SECTION
@@ -86,8 +106,13 @@ extern "C" {
 // hub + full-speed device config descriptor.
 #define CFG_TUH_ENUMERATION_BUFSIZE 512
 
-// The u-blox sits BEHIND the on-board CH334F hub — hub support is mandatory.
-#define CFG_TUH_HUB 1
+// The u-blox sits BEHIND the on-board hub — hub support is mandatory.
+// MUST be >= 2: the FW2 hub topology is CASCADED (the CH334F at the root has
+// ANOTHER hub-class device on its port 1 feeding the USB-A ports). Each hub
+// needs its own address slot; with 1, the second tier fails enumeration at
+// usbh.c:1577 `TU_ASSERT(new_addr != 0)` (verified via the RAM log 2026-07-01)
+// and nothing plugged into USB-A can ever mount. 3 = one slot of headroom.
+#define CFG_TUH_HUB 3
 
 // Devices (excluding hubs). Reference uses 4.
 #define CFG_TUH_DEVICE_MAX 4

@@ -1163,6 +1163,10 @@ volatile uint8_t  g_loop_phase            __attribute__((used)) = 0;
 volatile uint8_t  g_loop_max_gap_phase    __attribute__((used)) = 0;
 volatile uint32_t g_phase_max_ms[16]      __attribute__((used)) = {0};
 
+#if defined(FREEWILI) && defined(USE_TINYUSB_HOST)
+extern "C" void freewiliUsbHostService(void); // Task 3 spike: native USB host GPS reader
+#endif
+
 void loop()
 {
     runASAP = false;
@@ -1179,6 +1183,11 @@ void loop()
     }
     g_loop_last_ms = _now_ms;
     g_loop_iter_count++;
+#endif
+
+#if defined(FREEWILI) && defined(USE_TINYUSB_HOST)
+    // Task 3 spike: cooperatively drive the native USB host stack (GPS reader).
+    freewiliUsbHostService();
 #endif
 
 #if defined(FREEWILI)

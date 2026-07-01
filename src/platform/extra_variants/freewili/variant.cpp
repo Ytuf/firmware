@@ -338,9 +338,19 @@ void initVariant()
 extern "C" bool freewili_audio_init(void);
 extern "C" void freewili_audio_tone(uint32_t freq_hz, uint32_t duration_ms);
 
+#ifdef USE_TINYUSB_HOST
+extern "C" void freewiliUsbHostInit(void);
+#endif
+
 void lateInitVariant()
 {
     freewili_audio_init();
+
+#ifdef USE_TINYUSB_HOST
+    // Task 3 spike: bring up the native USB controller as a HOST and read the
+    // u-blox M8 GPS (USB-CDC) on a USB-A port. See usbhost/freewili_usb_host.*.
+    freewiliUsbHostInit();
+#endif
 
 #ifdef SCREEN_TOUCH_RST
     // FT5316 needs a hardware reset before it will respond to polling reads.

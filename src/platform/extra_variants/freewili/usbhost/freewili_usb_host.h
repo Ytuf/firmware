@@ -33,6 +33,10 @@ extern volatile uint16_t g_freewili_gps_pid;
 extern volatile uint32_t g_freewili_gps_mount_count;
 extern volatile uint32_t g_freewili_gps_nmea_bytes;
 
+// Increments every time the host task() is polled. Distinguishes "host stack
+// never polled" (stays 0) from "polled but nothing mounts" (climbs, mounts=0).
+extern volatile uint32_t g_freewili_usbhost_task_count;
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,10 +5,11 @@
 // task brief). Defining USE_TINYUSB + USE_TINYUSB_HOST (in platformio.ini)
 // flips the native controller (roothub port 0) from CDC *device* to *host*
 // (see ports/rp2040/tusb_config_rp2040.h: USE_TINYUSB_HOST -> CFG_TUD_ENABLED
-// 0, CFG_TUH_ENABLED 1, CFG_TUH_RPI_PIO_USB 0). That library config already
-// enables CDC host (CFG_TUH_CDC) + hub (CFG_TUH_HUB, needed because the u-blox
-// sits behind the CH334F hub), so no custom tusb_config.h is required for this
-// route — we reuse the vendored fwUSBHostCDC *logic*, not its pico-SDK config.
+// 0, CFG_TUH_ENABLED 1, CFG_TUH_RPI_PIO_USB 0). Because per-TU include-path
+// ordering made the core's device-only tusb_config.h race Adafruit's host-aware
+// one, we now force ONE global config via -D CFG_TUSB_CONFIG_FILE (see
+// variants/rp2350/freewili/tusb_config_freewili.h) so every TU agrees on
+// CFG_TUH_ENABLED + CFG_TUH_HUB (the u-blox sits behind the CH334F hub).
 
 #include "configuration.h" // LOG_INFO / LOG_WARN
 
@@ -23,6 +24,7 @@ volatile uint16_t g_freewili_gps_vid = 0;
 volatile uint16_t g_freewili_gps_pid = 0;
 volatile uint32_t g_freewili_gps_mount_count = 0;
 volatile uint32_t g_freewili_gps_nmea_bytes = 0;
+volatile uint32_t g_freewili_usbhost_task_count = 0;
 
 // Native USB host on roothub port 0 (no ctor args == native controller).
 static Adafruit_USBH_Host USBHost;
@@ -41,6 +43,11 @@ void freewiliUsbHostInit(void)
 
 void freewiliUsbHostService(void)
 {
+    // Proves the host task is actually being polled (GDB-observable). If this
+    // stays 0 the loop never reaches here; if it climbs while mount_count stays
+    // 0 the stack is polled but nothing enumerates.
+    g_freewili_usbhost_task_count++;
+
     // Drive enumeration / transfers. Cooperative, non-blocking.
     USBHost.task();
 

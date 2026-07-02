@@ -1,0 +1,9 @@
+{
+  "name": "pico_pio_usb",
+  "description": "Vendored sekigon-gonnoc Pico-PIO-USB (PIO-based USB PHY for RP2040/RP2350). Copied from freewili-firmware/freewilimain/usb-host/Pico-PIO-USB (RP2350-E9-aware revision) for the FreeWili Task-5 dual-root build: device on GPIO 42/43 (USB_SEC_P/N). Vendored instead of the registry package because the registry copy drags in an external Adafruit TinyUSB + SdFat dependency avalanche that collides with arduino-pico's bundled libraries.",
+  "version": "0.7.0-freewili",
+  "build": {
+    "srcDir": "src",
+    "flags": ["-Wno-unused-parameter"]
+  }
+}

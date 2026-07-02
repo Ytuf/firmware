@@ -19,6 +19,7 @@
 
 #include "../freewili_gps.h"
 #include "Adafruit_TinyUSB.h"
+#include <hardware/gpio.h>
 
 // GDB-observable state.
 volatile uint16_t g_freewili_gps_vid = 0;
@@ -47,6 +48,15 @@ void freewiliUsbHostInit(void)
     // expander during initIOExpanderPicoSDK(), so devices can enumerate.
     USBHost.begin(0);
     LOG_INFO("FreeWili USB host: native controller up on rhport0\n");
+
+    // Task 5 device side: pio_usb device mode expects an EXTERNAL 1.5k
+    // pull-up on D+ (pio_usb_device_init calls gpio_disable_pulls with a
+    // "needs external pull-up" comment) — FW2 rev 20 has only 27R series
+    // resistors on USB_SEC_P/N, no pull-up, so the USB2517 never sees an
+    // attach. Use the RP2350's internal pull-up (~50k) instead: out of USB
+    // spec but sufficient for the on-board hub to detect the idle-J state.
+    // Flag for a future board rev: 1.5k from USB_SEC_P to 3V3.
+    gpio_pull_up(PIO_USB_DP_PIN_DEFAULT);
 }
 
 void freewiliUsbHostService(void)
@@ -58,6 +68,12 @@ void freewiliUsbHostService(void)
 
     // Drive enumeration / transfers. Cooperative, non-blocking.
     USBHost.task();
+
+    // Task 5: pump the PIO-USB DEVICE side (Meshtastic CDC console). Under
+    // FreeRTOS nothing else runs these — the core only calls them from the
+    // non-FreeRTOS delay()/yield() paths.
+    TinyUSB_Device_Task();
+    TinyUSB_Device_FlushCDC();
 
     // Drain the GPS CDC stream and log raw NMEA. tuh_cdc_rx_cb queues bytes;
     // we read them here on the main loop so the ISR/callback stays short.

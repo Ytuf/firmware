@@ -74,19 +74,37 @@ extern FreeWiliTusbRingLog g_freewiliTusbLog;
 #define CFG_TUSB_MEM_ALIGN TU_ATTR_ALIGNED(4)
 
 //--------------------------------------------------------------------
-// ROLE: native controller (roothub port 0) = HOST, device OFF
+// ROLES (Task 5 dual-root, wili8jam pattern with roles reversed):
+//   rhport 0 = native controller  = HOST   (u-blox GPS behind the hubs)
+//   rhport 1 = Pico-PIO-USB       = DEVICE (Meshtastic CDC console,
+//              GPIO 42/43 = USB_SEC_P/N -> USB2517 hub port 2 -> PC)
 //--------------------------------------------------------------------
 
-#define CFG_TUD_ENABLED     0 /* device stack off — native root is a host */
+#define CFG_TUD_ENABLED     1 /* device stack ON — via PIO-USB (rhport 1) */
+#define CFG_TUD_RPI_PIO_USB 1 /* selects dcd_pio_usb; dcd_rp2040 (native) is \
+                                 compiled out by its !CFG_TUD_RPI_PIO_USB guard. \
+                                 Pins come from -D PIO_USB_DP_PIN_DEFAULT=42 \
+                                 (DP=42, DM=43 per the DPDM default).          \
+                                 NB: the core's main() calls                   \
+                                 TinyUSB_Device_Init(0); the PIO dcd ignores   \
+                                 the rhport number, so device init lands on    \
+                                 the PIO port regardless. */
 #define CFG_TUH_ENABLED     1
-#define CFG_TUH_RPI_PIO_USB 0 /* native RP2350 USB controller, NOT Pico-PIO-USB */
+#define CFG_TUH_RPI_PIO_USB 0 /* host is the native RP2350 USB controller */
 #define CFG_TUH_MAX3421     0
 #define BOARD_TUH_RHPORT    0
 #define CFG_TUH_MAX_SPEED   OPT_MODE_FULL_SPEED
+#define CFG_TUSB_RHPORT0_MODE (OPT_MODE_HOST | OPT_MODE_FULL_SPEED)
+#define CFG_TUSB_RHPORT1_MODE (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 
 //--------------------------------------------------------------------
-// DEVICE — disabled, but keep CFG_TUD_CDC nonzero so the library still
-// defines the (inert) `Serial` object and its host-mode stub methods.
+// DEVICE — CDC only. Adafruit_USBD_Device::begin() auto-adds the
+// `Serial` CDC descriptor, so Meshtastic's SerialConsole/StreamAPI on
+// `Serial` works over the PIO-USB port with no binding changes.
+// REQUIREMENT: PIO-USB needs sys_clk to be a multiple of 12 MHz —
+// platformio.ini sets board_build.f_cpu = 240 MHz (wili8jam ran the
+// same RP2350 PIO-USB at 252 MHz). WS2812/SerialPIO/audio all derive
+// timing from the live clock or hardware timers, so they adapt.
 //--------------------------------------------------------------------
 
 #define CFG_TUD_ENDPOINT0_SIZE 64

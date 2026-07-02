@@ -246,6 +246,31 @@ static void __no_inline_not_in_flash_func(usb_device_packet_handler)(void) {
     wait_receive_complete(pp);
     restart_usb_receiver(pp);
   }
+
+  // [FreeWili] Post pending events to the TinyUSB dcd AT IRQ TIME instead of
+  // waiting for the deferred pio_usb_device_task() pump. rport->setup_packet
+  // points INTO the shared RX buffer (set above); the OUT data stage of a
+  // control transfer arrives microseconds after its SETUP and overwrites
+  // that buffer, so a deferred reader gets the payload instead of the setup
+  // (observed live: SET_LINE_CODING's 115200-baud bytes surfaced as a
+  // "setup packet" and port opens failed). dcd_event_setup_received()
+  // copies the 8 bytes immediately, closing the race. ENDPOINT_CONTINUE is
+  // handled first because the dcd override clears ALL ints and doesn't know
+  // that event (it feeds the next chunk of a multi-packet transfer).
+  if (rport->ints & PIO_USB_INTS_ENDPOINT_CONTINUE_BITS) {
+    for (int b = 0; b < 16; b++) {
+      if (rport->ep_continue & (1 << b)) {
+        endpoint_t *cep = PIO_USB_ENDPOINT((b << 1) | 0x01);
+        uint16_t const xact_len = pio_usb_ll_get_transaction_len(cep);
+        pio_usb_ll_transfer_continue(cep, xact_len);
+        rport->ep_continue &= ~(1 << b);
+      }
+    }
+    rport->ints &= ~PIO_USB_INTS_ENDPOINT_CONTINUE_BITS;
+  }
+  if (rport->ints) {
+    pio_usb_device_irq_handler(0);
+  }
 }
 
 usb_device_t *pio_usb_device_init(const pio_usb_configuration_t *c,
@@ -370,7 +395,27 @@ void pio_usb_device_task(void) {
   root_port_t *rport = PIO_USB_ROOT_PORT(0);
   pio_port_t *pp = PIO_USB_PIO_PORT(0);
   if (rport->ints) {
-    pio_usb_device_irq_handler(0);
+    // [FreeWili] ENDPOINT_CONTINUE is low-level plumbing — feed the next
+    // 64-byte chunk of a multi-packet transfer. The TinyUSB dcd override of
+    // pio_usb_device_irq_handler (dcd_pio_usb.c, older pairing) does not
+    // know this event and silently drops it, so multi-packet EP0 IN stages
+    // (first hit: the config descriptor) stall and the host resets us
+    // (observed live). Handle it here before dispatching the rest; TinyUSB
+    // only needs the final ENDPOINT_COMPLETE.
+    if (rport->ints & PIO_USB_INTS_ENDPOINT_CONTINUE_BITS) {
+      for (int b = 0; b < 16; b++) {
+        if (rport->ep_continue & (1 << b)) {
+          endpoint_t *ep = PIO_USB_ENDPOINT((b << 1) | 0x01);
+          uint16_t const xact_len = pio_usb_ll_get_transaction_len(ep);
+          pio_usb_ll_transfer_continue(ep, xact_len);
+          rport->ep_continue &= ~(1 << b);
+        }
+      }
+      rport->ints &= ~PIO_USB_INTS_ENDPOINT_CONTINUE_BITS;
+    }
+    if (rport->ints) {
+      pio_usb_device_irq_handler(0);
+    }
   }
 
   switch (ep0_desc_request_type) {
@@ -507,6 +552,9 @@ static int __no_inline_not_in_flash_func(process_device_setup_stage)(uint8_t *bu
 }
 
 // IRQ Handler
+// [FreeWili] marked unused: the weak alias below is disabled so the TinyUSB
+// dcd override actually receives events (see comment at the alias).
+__attribute__((unused))
 static void __no_inline_not_in_flash_func(__pio_usb_device_irq_handler)(uint8_t root_idx) {
   root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
   usb_device_t *dev = &pio_usb_device[0];
@@ -565,6 +613,16 @@ static void __no_inline_not_in_flash_func(__pio_usb_device_irq_handler)(uint8_t 
 }
 
 // weak alias to __pio_usb_device_irq_handler
-void pio_usb_device_irq_handler(uint8_t root_id) __attribute__ ((weak, alias("__pio_usb_device_irq_handler")));
+// [FreeWili] DISABLED. With the weak alias defined in this same translation
+// unit, GCC binds the call in pio_usb_device_task() directly to the internal
+// handler above (local binding beats weak-symbol interposition), and the
+// linker then garbage-collects TinyUSB's strong override in dcd_pio_usb.c.
+// Result: TinyUSB never receives device events and the internal standalone
+// stack answers enumeration from dcd's EMPTY descriptor buffers — the host
+// sees "Device Descriptor Request Failed" (verified live on FW2,
+// 2026-07-01). Leaving the symbol UNDEFINED here forces the linker to
+// resolve it from dcd_pio_usb.o's strong definition.
+// void pio_usb_device_irq_handler(uint8_t root_id) __attribute__ ((weak, alias("__pio_usb_device_irq_handler")));
+extern void pio_usb_device_irq_handler(uint8_t root_id);
 
 #pragma GCC pop_options

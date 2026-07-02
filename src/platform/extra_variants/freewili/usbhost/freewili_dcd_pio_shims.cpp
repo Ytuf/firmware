@@ -22,11 +22,24 @@
 
 extern "C" {
 
+// The core's main() hardcodes TinyUSB_Device_Init(0), but dcd_pio_usb tags
+// every event it posts with rhport = root_id + 1 = 1 (dcd_pio_usb.c:178).
+// A device stack registered on rhport 0 silently drops those events — the
+// PC sees the attach (pull-up) but every descriptor request times out
+// ("Device Descriptor Request Failed", observed live). Redirect the init to
+// rhport 1 so usbd and the PIO dcd agree; rhport 0 stays purely HOST.
+// Wired up via -Wl,--wrap=TinyUSB_Device_Init in platformio.ini.
+void __real_TinyUSB_Device_Init(uint8_t rhport);
+void __wrap_TinyUSB_Device_Init(uint8_t rhport)
+{
+    (void)rhport;
+    __real_TinyUSB_Device_Init(1);
+}
+
 // tusb.c's tusb_int_handler() references this strongly, but it can never run:
-// it dispatches here only when _tusb_rhport_role[rhport]==DEVICE, and after
-// boot completes role[0]==HOST (tuh_init overwrites the core's early device
-// registration) while nothing raises tusb_int_handler for rhport 1 — the PIO
-// device's events flow through pio-usb's own IRQ into the usbd queue instead.
+// it dispatches here only when _tusb_rhport_role[rhport]==DEVICE, and the
+// native controller IRQ only raises tusb_int_handler(0) whose role is HOST —
+// the PIO device's events flow through pio-usb's own IRQ into the usbd queue.
 void dcd_int_handler(uint8_t rhport)
 {
     (void)rhport;

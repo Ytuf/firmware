@@ -21,6 +21,29 @@
 #include "Adafruit_TinyUSB.h"
 #include <hardware/gpio.h>
 
+extern "C" {
+#include "pio_usb.h" // pio_usb_device_task — vendored lib/pico_pio_usb
+}
+#include <hardware/irq.h>
+#include <hardware/pio.h>
+#include <pico/time.h>
+
+// Enumeration control stages have host-side deadlines (SET_ADDRESS gives the
+// device 50 ms) that Meshtastic's main loop cannot meet — its boot-time gaps
+// run 100-300 ms and the host resets us mid-enumeration (observed live:
+// Set Address processed, then the host's request to the new address timed
+// out and it started over). Pump the device engine from a repeating hardware
+// timer instead. TinyUSB_Device_Task is ISR-safe by design (mutex_try_enter
+// — the rp2040 port itself invokes it from a user IRQ).
+static repeating_timer_t s_usb_device_timer;
+
+static bool freewili_usb_device_timer_cb(repeating_timer_t *)
+{
+    pio_usb_device_task();
+    TinyUSB_Device_Task();
+    return true; // keep repeating
+}
+
 // GDB-observable state.
 volatile uint16_t g_freewili_gps_vid = 0;
 volatile uint16_t g_freewili_gps_pid = 0;
@@ -59,6 +82,18 @@ void freewiliUsbHostInit(void)
     // internal pull below keeps the strap weakly high in the meantime
     // (~50k — NOT enough for USB attach, but harmless).
     gpio_pull_up(PIO_USB_DP_PIN_DEFAULT);
+
+    // 250 us cadence ≈ 4 kHz: fast enough for control-stage deadlines, a few
+    // µs of work per tick when idle.
+    add_repeating_timer_us(-250, freewili_usb_device_timer_cb, nullptr, &s_usb_device_timer);
+
+    // The pio_usb packet IRQ must OUTRANK the pump timer (both default to
+    // 0x80): pio_usb_device_task() busy-waits through the 10 ms bus-reset
+    // SE0 inside the timer callback, and a same-priority packet IRQ can't
+    // preempt it — token responses miss the host's turnaround window and
+    // enumeration data stages time out (observed live). Priority 0 lets
+    // packet handling interrupt the pump.
+    irq_set_priority(PIO_IRQ_NUM(pio0, 0), 0);
 }
 
 void freewiliUsbHostService(void)
@@ -74,6 +109,14 @@ void freewiliUsbHostService(void)
     // Task 5: pump the PIO-USB DEVICE side (Meshtastic CDC console). Under
     // FreeRTOS nothing else runs these — the core only calls them from the
     // non-FreeRTOS delay()/yield() paths.
+    //
+    // pio_usb_device_task() is the pio-usb device engine for this library
+    // revision: it converts the IRQ-level rport->ints into TinyUSB dcd
+    // events (via pio_usb_device_irq_handler → dcd_pio_usb.c), continues
+    // pending EP0 descriptor stages, detects bus reset by polling SE0, and
+    // re-enables the edge-detector SM after a reset. Without this pump the
+    // device attaches (pull-up) but never answers enumeration.
+    pio_usb_device_task();
     TinyUSB_Device_Task();
     TinyUSB_Device_FlushCDC();
 

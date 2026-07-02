@@ -9,6 +9,12 @@ static SerialPIO picSerial(PIC_UART_TX_PIN, PIC_UART_RX_PIN, 64);
 
 PICButtonInput *picButtonInput = nullptr;
 
+// SWD-observable: proves the new rpPICComm parser is syncing + checksum-passing
+// the PIC's button frames even with no key pressed (frames stream as a heartbeat).
+volatile uint32_t g_freewili_pic_btn_frames = 0;
+volatile uint16_t g_freewili_pic_last_buttons = 0;
+volatile uint32_t g_freewili_pic_rx_bytes = 0;
+
 PICButtonInput::PICButtonInput() : concurrency::OSThread("PICButton")
 {
 }
@@ -26,35 +32,81 @@ int32_t PICButtonInput::runOnce()
 #if defined(PIC_UART_RX_PIN)
     while (picSerial.available()) {
         uint8_t byte = picSerial.read();
+        g_freewili_pic_rx_bytes++;
         switch (picState) {
-        case WAIT_HEADER1:
-            if (byte == PIC_SYNC1)
-                picState = WAIT_HEADER2;
+        case WAIT_SYNC1:
+            if (byte == PIC_SYNC1) {
+                calcChecksum = byte;
+                picState = WAIT_SYNC2;
+            }
             break;
-        case WAIT_HEADER2:
-            // Match the rpPICComm resync behavior: a second 0xC0 keeps us in
-            // WAIT_HEADER2 in case bytes got chopped; otherwise need 0xC5 to advance.
-            if (byte == PIC_SYNC2)
-                picState = WAIT_LSB;
-            else if (byte == PIC_SYNC1)
-                picState = WAIT_HEADER2;
-            else
-                picState = WAIT_HEADER1;
+        case WAIT_SYNC2:
+            // Resync: a second 0xB0 keeps us hunting for the 0x1D that follows.
+            if (byte == PIC_SYNC2) {
+                calcChecksum += byte;
+                picState = WAIT_LEN_LSB;
+            } else if (byte == PIC_SYNC1) {
+                calcChecksum = byte;
+                picState = WAIT_SYNC2;
+            } else {
+                picState = WAIT_SYNC1;
+            }
             break;
-        case WAIT_LSB:
-            // Wire format from PIC is BIG-ENDIAN: byte after 0xC0 0xC5 is the
-            // MSB. (Field is named `lsb` per the old draft; despite the name
-            // we store the MSB here, matching freewilimain rpPICComm.cpp.)
-            lsb = byte;
-            picState = WAIT_MSB;
+        case WAIT_LEN_LSB:
+            length = byte;
+            calcChecksum += byte;
+            picState = WAIT_LEN_MSB;
             break;
-        case WAIT_MSB: {
-            uint16_t buttons = ((uint16_t)lsb << 8) | byte;
-            processButtonChange(buttons);
-            prevButtons = buttons;
-            picState = WAIT_HEADER1;
+        case WAIT_LEN_MSB:
+            length |= ((uint16_t)byte << 8);
+            calcChecksum += byte;
+            picState = WAIT_EVENT;
             break;
-        }
+        case WAIT_EVENT:
+            calcChecksum += byte;
+            event = byte;
+            if (byte == PIC_EVENT_BUTTONS && length == 2) {
+                picState = WAIT_BTN_LOW;
+            } else if (length <= 512) {
+                // Any other framed event (e.g. battery 0xB1): consume the
+                // payload so we stay aligned, then verify the checksum.
+                payloadCount = 0;
+                picState = length ? WAIT_PAYLOAD : WAIT_CK_LSB;
+            } else {
+                picState = WAIT_SYNC1; // implausible length — resync
+            }
+            break;
+        case WAIT_BTN_LOW:
+            // First button byte on the wire is buttons.all bits 0..7.
+            btnLow = byte;
+            calcChecksum += byte;
+            picState = WAIT_BTN_HIGH;
+            break;
+        case WAIT_BTN_HIGH:
+            btnHigh = byte; // second byte = buttons.all bits 8..15
+            calcChecksum += byte;
+            picState = WAIT_CK_LSB;
+            break;
+        case WAIT_PAYLOAD:
+            calcChecksum += byte;
+            if (++payloadCount >= length)
+                picState = WAIT_CK_LSB;
+            break;
+        case WAIT_CK_LSB:
+            rxChecksum = byte;
+            picState = WAIT_CK_MSB;
+            break;
+        case WAIT_CK_MSB:
+            rxChecksum |= ((uint16_t)byte << 8);
+            if (rxChecksum == calcChecksum && event == PIC_EVENT_BUTTONS) {
+                uint16_t buttons = ((uint16_t)btnHigh << 8) | btnLow;
+                g_freewili_pic_btn_frames++;
+                g_freewili_pic_last_buttons = buttons;
+                processButtonChange(buttons);
+                prevButtons = buttons;
+            }
+            picState = WAIT_SYNC1;
+            break;
         }
     }
 #endif

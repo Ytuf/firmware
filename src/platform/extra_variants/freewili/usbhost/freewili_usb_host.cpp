@@ -51,11 +51,13 @@ void freewiliUsbHostInit(void)
 
     // Task 5 device side: pio_usb device mode expects an EXTERNAL 1.5k
     // pull-up on D+ (pio_usb_device_init calls gpio_disable_pulls with a
-    // "needs external pull-up" comment) — FW2 rev 20 has only 27R series
-    // resistors on USB_SEC_P/N, no pull-up, so the USB2517 never sees an
-    // attach. Use the RP2350's internal pull-up (~50k) instead: out of USB
-    // spec but sufficient for the on-board hub to detect the idle-J state.
-    // Flag for a future board rev: 1.5k from USB_SEC_P to 3V3.
+    // "needs external pull-up" comment). On FW2 the pull-up exists but is
+    // shared: GPIO42/USB_SEC_P runs through R344 (1.5k) to WIO_BOOT — the
+    // Wio-E5's PB13 boot strap (rev 23 sheets 3+7). Attach only works while
+    // the WIO drives PB13 HIGH; the current wio-e5-bridge leaves it floating,
+    // so the hub sees nothing until the bridge adds that (pending). The
+    // internal pull below keeps the strap weakly high in the meantime
+    // (~50k — NOT enough for USB attach, but harmless).
     gpio_pull_up(PIO_USB_DP_PIN_DEFAULT);
 }
 

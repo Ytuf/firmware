@@ -767,6 +767,152 @@ void drawDistanceScreen(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t
     drawNodeListScreen(display, state, x, y, title, drawNodeDistance);
 }
 #endif
+
+#if defined(FREEWILI)
+// Format a range (meters) honoring the user's display-unit setting.
+static void freewiliFormatRange(float meters, char *buf, size_t n)
+{
+    if (config.display.units == meshtastic_Config_DisplayConfig_DisplayUnits_IMPERIAL) {
+        float feet = meters * 3.28084f;
+        if (feet < 1000.0f)
+            snprintf(buf, n, "%dft", (int)feet);
+        else
+            snprintf(buf, n, "%.1fmi", feet / 5280.0f);
+    } else {
+        if (meters < 1000.0f)
+            snprintf(buf, n, "%dm", (int)meters);
+        else
+            snprintf(buf, n, "%.1fkm", meters / 1000.0f);
+    }
+}
+
+// FreeWili node "radar": you at center, every mesh node with a known position
+// plotted at its true bearing + distance, the outer ring auto-scaled to the
+// farthest node. North-up (the BMM350 heading is uncalibrated on a stationary
+// unit — see freewili_compass.cpp); re-enable heading-up once it's calibrated.
+volatile int32_t g_fw_disp_w = 0; // SWD: actual canvas dims this frame renders to
+volatile int32_t g_fw_disp_h = 0;
+void drawFreewiliNodeMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
+{
+    display->clear();
+    graphics::drawCommonHeader(display, x, y, "Node Map");
+
+    // Use the real drawing surface, not the SCREEN_* panel macros — on this
+    // board they differ, and sizing to the macros overran the canvas.
+    const int16_t W = display->getWidth();
+    const int16_t H = display->getHeight();
+    g_fw_disp_w = W;
+    g_fw_disp_h = H;
+    const int16_t headerH = FONT_HEIGHT_SMALL - 1;
+    const int16_t top = y + headerH;
+    const int16_t availH = H - headerH;
+
+    display->setFont(FONT_SMALL);
+    display->setColor(WHITE);
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+
+    auto *ourNode = nodeDB->getMeshNode(nodeDB->getNodeNum());
+    if (!ourNode || !nodeDB->hasValidPosition(ourNode)) {
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(x + W / 2, top + availH / 2 - FONT_HEIGHT_SMALL / 2, "Waiting for GPS fix");
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        return;
+    }
+
+    double myLat = DegD(ourNode->position.latitude_i);
+    double myLon = DegD(ourNode->position.longitude_i);
+
+    // North-up (heading uncalibrated on a stationary unit — see the comment above).
+    float myHeadingRad = 0.0f;
+
+    // Radar lives in a square on the RIGHT (like the stock compass screen); the
+    // LEFT is a left-aligned text column. Keeping them in separate halves makes
+    // it impossible for text to collide with the circle or run off an edge.
+    int16_t radius = (availH / 2) - 10;
+    int16_t maxR = (W - 140) / 2; // reserve ~140px for the left text column
+    if (radius > maxR)
+        radius = maxR;
+    if (radius < 8)
+        radius = 8;
+    int16_t cx = x + W - radius - 8;
+    int16_t cy = top + availH / 2;
+
+    // Pass 1: farthest positioned peer sets the outer-ring range.
+    float maxRange = 0.0f;
+    int peers = 0;
+    int total = nodeDB->getNumMeshNodes();
+    for (int i = 0; i < total; i++) {
+        auto *n = nodeDB->getMeshNodeByIndex(i);
+        if (!n || n->num == nodeDB->getNodeNum() || !nodeDB->hasValidPosition(n))
+            continue;
+        float d = GeoCoord::latLongToMeter(myLat, myLon, DegD(n->position.latitude_i), DegD(n->position.longitude_i));
+        if (d > maxRange)
+            maxRange = d;
+        peers++;
+    }
+    if (maxRange < 50.0f)
+        maxRange = 50.0f; // floor so very-close nodes don't all stack at center
+
+    // Rings + north tick + me.
+    display->drawCircle(cx, cy, radius);
+    display->drawCircle(cx, cy, radius / 2);
+    CompassRenderer::drawCompassNorth(display, cx, cy, myHeadingRad, radius);
+    display->fillCircle(cx, cy, 3);
+
+    // drawCompassNorth() leaves the text alignment on CENTER (to centre its "N")
+    // and never restores it — that is what pushed the left column half off the
+    // left edge. Force LEFT before drawing any column text.
+    display->setColor(WHITE);
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+
+    // Left text column: header (range + count), then one row per node. Always
+    // left-aligned starting at tx, so it can only extend rightward toward the
+    // radar — never off the left edge.
+    const int16_t tx = x + 4;
+    int16_t ty = top + 2;
+    char buf[40], rbuf[24];
+    freewiliFormatRange(maxRange, rbuf, sizeof(rbuf));
+    snprintf(buf, sizeof(buf), "Rng %s", rbuf);
+    display->drawString(tx, ty, buf);
+    ty += FONT_HEIGHT_SMALL;
+    snprintf(buf, sizeof(buf), "%d node%s", peers, peers == 1 ? "" : "s");
+    display->drawString(tx, ty, buf);
+    ty += FONT_HEIGHT_SMALL;
+
+    // Pass 2: plot each positioned peer as a blip, and list it in the column.
+    for (int i = 0; i < total; i++) {
+        auto *n = nodeDB->getMeshNodeByIndex(i);
+        if (!n || n->num == nodeDB->getNodeNum() || !nodeDB->hasValidPosition(n))
+            continue;
+        double nLat = DegD(n->position.latitude_i);
+        double nLon = DegD(n->position.longitude_i);
+        float bearing = GeoCoord::bearing(myLat, myLon, nLat, nLon); // radians, 0=N, clockwise
+        float dist = GeoCoord::latLongToMeter(myLat, myLon, nLat, nLon);
+        float ang = bearing - myHeadingRad;
+        float rr = radius * (dist / maxRange);
+        if (rr > radius)
+            rr = radius;
+        int16_t bx = cx + (int16_t)(rr * sinf(ang));
+        int16_t by = cy - (int16_t)(rr * cosf(ang));
+        display->fillCircle(bx, by, 2);
+
+        if (ty < top + availH - FONT_HEIGHT_SMALL) { // list until the column is full
+            freewiliFormatRange(dist, rbuf, sizeof(rbuf));
+            // Same name resolution the other node screens use (long/short per
+            // config, else "(XXXX)" node-id fallback); truncate for the column.
+            std::string nm = getSafeNodeName(display, n, 0);
+            if (nm.size() > 10)
+                nm = nm.substr(0, 10);
+            snprintf(buf, sizeof(buf), "%s  %s", nm.c_str(), rbuf);
+            display->drawString(tx, ty, buf);
+            ty += FONT_HEIGHT_SMALL;
+        }
+    }
+    display->setColor(WHITE);
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+}
+#endif
+
 void drawNodeListWithCompasses(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
     float heading = 0;

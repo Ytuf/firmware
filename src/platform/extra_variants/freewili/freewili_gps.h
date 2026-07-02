@@ -21,3 +21,9 @@ bool freewiliGpsHasFix();
 
 /// Forget the fix (e.g. on CDC unmount) so status reflects reality.
 void freewiliGpsResetFix();
+
+/// Inject a static fallback position (booth / lab coordinates) so the map and
+/// position screens work indoors with no satellite lock. No-op unless built with
+/// -DFW_GPS_STATIC_FALLBACK. A real GPS fix, if one ever arrives, overrides it.
+/// Call once at setup after NodeDB is up.
+void freewiliGpsInjectFallback();

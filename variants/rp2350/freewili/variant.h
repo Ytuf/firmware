@@ -62,7 +62,17 @@
 #define LORA_CS 5
 #endif
 
-// PIC16 button input: 16-bit bitmap big-endian @ 62500 baud on SerialPIO
+// GPS: no standard GPS driver (position is injected into nodeDB + gpsStatus by
+// the USB-host NMEA path in extra_variants/freewili/freewili_gps.cpp). HAS_GPS
+// is set purely to COMPILE IN the stock "Position"/compass screen and the
+// header sat-count UI (all gated on #if HAS_GPS). No GPS_RX_PIN is defined, so
+// GPS::createGps() returns null and no standard GPS thread runs; freewili_gps
+// feeds gpsStatus directly. gps_mode is forced ENABLED for FREEWILI in
+// NodeDB::installDefaultConfig so the screen renders the compass instead of
+// "No GPS".
+#define HAS_GPS 1
+
+// PIC16 button input: framed rpPICComm protocol @ 62500 baud on SerialPIO
 // (hardware UARTs are taken). PIN names are from the PIC's perspective —
 // PIC_UART_TX_PIN (38) is the MCU's TX into the PIC.
 #define HAS_PIC_BUTTON_INPUT 1

@@ -1107,6 +1107,11 @@ void Screen::setFrames(FrameFocus focus)
         normalFrames[numframes++] = graphics::NodeListRenderer::drawDistanceScreen;
         indicatorIcons.push_back(icon_distance);
     }
+#if defined(FREEWILI)
+    // FreeWili all-nodes radar map (self at center, peers at bearing/distance).
+    normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliNodeMap;
+    indicatorIcons.push_back(icon_compass);
+#endif
 #endif
 #if HAS_GPS
 #ifdef USE_EINK

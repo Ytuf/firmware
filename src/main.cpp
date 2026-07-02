@@ -949,6 +949,10 @@ void setup()
 #if defined(FREEWILI)
     extern void freewili_register_haptic_observer();
     freewili_register_haptic_observer();
+    extern void freewili_register_compass();
+    freewili_register_compass(); // BMM350 mag + BMI323 accel -> screen->setHeading()
+    extern void freewiliGpsInjectFallback();
+    freewiliGpsInjectFallback(); // static booth/lab position so the map works with no GPS lock
 #endif
     if (inputBroker)
         inputBroker->Init();

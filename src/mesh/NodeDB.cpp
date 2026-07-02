@@ -740,6 +740,14 @@ void NodeDB::installDefaultConfig(bool preserveKey = false)
 #else
     config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_ENABLED;
 #endif
+#if defined(FREEWILI)
+    // FreeWili has no standard GPS driver: the USB-host NMEA path injects the
+    // fix into gpsStatus + nodeDB directly (freewili_gps.cpp). The default
+    // above resolves to NOT_PRESENT (HAS_GPS=1 but no GPS_RX_PIN), which makes
+    // the Position screen print "No GPS". Force ENABLED so it renders the
+    // compass + coordinates from the fed gpsStatus.
+    config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_ENABLED;
+#endif
 #ifdef USERPREFS_CONFIG_SMART_POSITION_ENABLED
     config.position.position_broadcast_smart_enabled = USERPREFS_CONFIG_SMART_POSITION_ENABLED;
 #else

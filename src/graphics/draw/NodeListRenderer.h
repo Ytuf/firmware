@@ -53,6 +53,10 @@ void drawDistanceScreen(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t
 void drawDynamicListScreen_Nodes(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 void drawDynamicListScreen_Location(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 void drawNodeListWithCompasses(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
+#if defined(FREEWILI)
+// FreeWili all-nodes radar map (center = me, blips at bearing/distance).
+void drawFreewiliNodeMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
+#endif
 
 // Utility functions
 const char *getCurrentModeTitle_Nodes(int screenWidth);

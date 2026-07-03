@@ -938,13 +938,42 @@ void drawFreewiliWifiSurvey(OLEDDisplay *display, OLEDDisplayUiState *state, int
     }
     std::sort(aps, aps + n, [](const FreewiliWifiAp &a, const FreewiliWifiAp &b) { return a.rssi > b.rssi; });
 
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%u AP%s heard", (unsigned)n, n == 1 ? "" : "s");
-    display->drawString(x + 4, ty, buf);
-    ty += FONT_HEIGHT_SMALL;
+    // Collapse duplicate SSIDs (dual-band / multi-radio APs broadcast one network
+    // name on several BSSIDs) — keep the strongest per name, so the list shows
+    // unique networks instead of repeats. Empty/hidden names collapse to one entry.
+    FreewiliWifiAp uniq[FW_WIFI_MAX_APS];
+    size_t u = 0;
+    for (size_t i = 0; i < n; i++) {
+        bool dup = false;
+        for (size_t j = 0; j < u; j++) {
+            if (strncmp(aps[i].ssid, uniq[j].ssid, FW_WIFI_SSID_LEN) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup)
+            uniq[u++] = aps[i];
+    }
 
-    for (size_t i = 0; i < n && ty < H - FONT_HEIGHT_SMALL; i++) {
-        const FreewiliWifiAp &a = aps[i];
+    // Auto-paginate through all unique networks (no scroll input on this frame):
+    // advance one page every ~3.5 s, wrapping, so the whole list cycles into view.
+    char buf[64];
+    int16_t apTop = ty + FONT_HEIGHT_SMALL; // AP rows start below the summary line
+    int linesPerPage = (H - FONT_HEIGHT_SMALL - apTop) / FONT_HEIGHT_SMALL;
+    if (linesPerPage < 1)
+        linesPerPage = 1;
+    int numPages = (int)((u + linesPerPage - 1) / (size_t)linesPerPage);
+    if (numPages < 1)
+        numPages = 1;
+    int page = (int)((millis() / 3500u) % (uint32_t)numPages);
+
+    snprintf(buf, sizeof(buf), "%u net%s / %u APs  p%d/%d", (unsigned)u, u == 1 ? "" : "s", (unsigned)n, page + 1,
+             numPages);
+    display->drawString(x + 4, ty, buf);
+    ty = apTop;
+
+    for (size_t i = (size_t)page * linesPerPage; i < u && (int)(i - (size_t)page * linesPerPage) < linesPerPage; i++) {
+        const FreewiliWifiAp &a = uniq[i];
         const char *nm = a.ssid[0] ? a.ssid : "(hidden)";
         snprintf(buf, sizeof(buf), "%-16.16s %ddBm ch%u/%s", nm, a.rssi, a.channel, a.band ? "5G" : "2.4");
         display->drawString(x + 4, ty, buf);

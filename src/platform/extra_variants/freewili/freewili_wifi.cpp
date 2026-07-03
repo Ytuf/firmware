@@ -74,7 +74,10 @@ volatile uint32_t g_freewili_wifi_rx_drops = 0;  // bytes dropped (ring full)
 // are the LoRa SPI here), so at 8 Mbaud a burst of forwarded AP frames overruns
 // the 32-byte uart0 FIFO between the ~20 ms runOnce polls. The RX ISR keeps the
 // FIFO drained into this ring; runOnce decodes from the ring at its own pace.
-#define FW_WIFI_RING_SZ 2048u // power of two
+// Power of two. Sized above a worst-case full scan (ESP caps ~48 APs x 48 B =
+// ~2.3 KB) forwarded as a burst, since the only drainer is runOnce (~20 ms, but
+// subject to 100-300 ms Meshtastic loop gaps) and there is no UART flow control.
+#define FW_WIFI_RING_SZ 8192u
 static volatile uint8_t s_rxRing[FW_WIFI_RING_SZ];
 static volatile uint32_t s_rxHead = 0; // written by ISR
 static volatile uint32_t s_rxTail = 0; // read by runOnce

@@ -930,7 +930,10 @@ void drawFreewiliWifiSurvey(OLEDDisplay *display, OLEDDisplayUiState *state, int
     display->setColor(WHITE);
     display->setTextAlignment(TEXT_ALIGN_LEFT);
 
-    FreewiliWifiAp aps[FW_WIFI_MAX_APS];
+    // Static (kept off the draw stack): FW_WIFI_MAX_APS entries is ~2.4 KB, and two
+    // such arrays on the stack overflowed the draw thread (Cortex-M33 STKOF fault).
+    // Safe as static: the screen renders single-threaded, one frame at a time.
+    static FreewiliWifiAp aps[FW_WIFI_MAX_APS];
     size_t n = freewiliWifiGetAps(aps, FW_WIFI_MAX_APS);
     if (n == 0) {
         display->drawString(x + 4, ty, "Scanning... (no APs yet)");
@@ -939,20 +942,23 @@ void drawFreewiliWifiSurvey(OLEDDisplay *display, OLEDDisplayUiState *state, int
     std::sort(aps, aps + n, [](const FreewiliWifiAp &a, const FreewiliWifiAp &b) { return a.rssi > b.rssi; });
 
     // Collapse duplicate SSIDs (dual-band / multi-radio APs broadcast one network
-    // name on several BSSIDs) — keep the strongest per name, so the list shows
-    // unique networks instead of repeats. Empty/hidden names collapse to one entry.
-    FreewiliWifiAp uniq[FW_WIFI_MAX_APS];
+    // name on several BSSIDs) — keep the strongest per name (first, since sorted by
+    // RSSI). Dedup IN PLACE, compacting unique entries to the front of aps[0..u), so
+    // no second array is needed on the stack.
     size_t u = 0;
     for (size_t i = 0; i < n; i++) {
         bool dup = false;
         for (size_t j = 0; j < u; j++) {
-            if (strncmp(aps[i].ssid, uniq[j].ssid, FW_WIFI_SSID_LEN) == 0) {
+            if (strncmp(aps[i].ssid, aps[j].ssid, FW_WIFI_SSID_LEN) == 0) {
                 dup = true;
                 break;
             }
         }
-        if (!dup)
-            uniq[u++] = aps[i];
+        if (!dup) {
+            if (u != i)
+                aps[u] = aps[i];
+            u++;
+        }
     }
 
     // Auto-paginate through all unique networks (no scroll input on this frame):
@@ -973,7 +979,7 @@ void drawFreewiliWifiSurvey(OLEDDisplay *display, OLEDDisplayUiState *state, int
     ty = apTop;
 
     for (size_t i = (size_t)page * linesPerPage; i < u && (int)(i - (size_t)page * linesPerPage) < linesPerPage; i++) {
-        const FreewiliWifiAp &a = uniq[i];
+        const FreewiliWifiAp &a = aps[i];
         const char *nm = a.ssid[0] ? a.ssid : "(hidden)";
         snprintf(buf, sizeof(buf), "%-16.16s %ddBm ch%u/%s", nm, a.rssi, a.channel, a.band ? "5G" : "2.4");
         display->drawString(x + 4, ty, buf);

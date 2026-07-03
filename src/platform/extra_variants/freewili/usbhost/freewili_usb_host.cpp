@@ -37,8 +37,20 @@ extern "C" {
 // — the rp2040 port itself invokes it from a user IRQ).
 static repeating_timer_t s_usb_device_timer;
 
+// The device engine (pio_usb_device_task + TinyUSB_Device_Task) is non-reentrant
+// and is pumped from BOTH this 4 kHz timer ISR and the main loop on core0. With
+// no USB device attached, the main loop reaches its pump region at a fixed early
+// instant that coincides with the timer ticks; the ISR then re-enters the engine
+// mid-pump and the striped __usb_mutex spinlock deadlocks (observed: boot hangs
+// in mutex_exit -> spin_lock_unsafe_blocking, LR here). The ISR strictly nests
+// inside loop() on core0 (never truly concurrent), so a plain flag is race-free:
+// skip the tick whenever the main loop already owns the engine.
+static volatile bool s_usb_pump_active = false;
+
 static bool freewili_usb_device_timer_cb(repeating_timer_t *)
 {
+    if (s_usb_pump_active)
+        return true; // main loop is mid-pump — don't re-enter the device engine
     pio_usb_device_task();
     TinyUSB_Device_Task();
     return true; // keep repeating
@@ -116,9 +128,11 @@ void freewiliUsbHostService(void)
     // pending EP0 descriptor stages, detects bus reset by polling SE0, and
     // re-enables the edge-detector SM after a reset. Without this pump the
     // device attaches (pull-up) but never answers enumeration.
+    s_usb_pump_active = true; // block the timer ISR from re-entering the device engine
     pio_usb_device_task();
     TinyUSB_Device_Task();
     TinyUSB_Device_FlushCDC();
+    s_usb_pump_active = false;
 
     // Drain the GPS CDC stream and log raw NMEA. tuh_cdc_rx_cb queues bytes;
     // we read them here on the main loop so the ISR/callback stays short.

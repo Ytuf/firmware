@@ -528,6 +528,11 @@ void drawNodeListScreen(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t
         }
     }
 
+    // FreeWili combined node view: one full-width row per node so name + all metrics
+    // (last-heard / signal / hops / distance) fit together.
+    if (strcmp(title, "Nodes") == 0)
+        totalColumns = 1;
+
     int columnWidth = display->getWidth() / totalColumns;
 
     int totalEntries = nodeDB->getNumMeshNodes();
@@ -787,6 +792,89 @@ static void freewiliFormatRange(float meters, char *buf, size_t n)
         else
             snprintf(buf, n, "%.1fkm", meters / 1000.0f);
     }
+}
+
+// FreeWili combined node row: name + last-heard + signal bars + hops + distance on
+// ONE full-width line. Consolidates the old Last Heard / Hops-Signal / Distance
+// frames, which differed only by a single metric column — pointless on a 480 px
+// screen wide enough to show them all at once.
+static void drawEntryNodes(OLEDDisplay *display, meshtastic_NodeInfoLite *node, int16_t x, int16_t y, int columnWidth)
+{
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+    display->setFont(FONT_SMALL);
+
+    // Name (left), truncated to leave room for the right-hand metric cluster.
+    int nameMaxWidth = columnWidth - 175;
+    char nodeName[96];
+    UIRenderer::truncateStringWithEmotes(display, getSafeNodeName(display, node, columnWidth).c_str(), nodeName,
+                                         sizeof(nodeName), nameMaxWidth);
+    UIRenderer::drawStringWithEmotes(display, x + 6, y, nodeName, FONT_HEIGHT_SMALL, 1, false);
+    if (node->is_favorite)
+        drawScaledXBitmap16x16(x, y + 6, smallbulletpoint_width, smallbulletpoint_height, smallbulletpoint, display);
+    bool isMuted = (node->bitfield & NODEINFO_BITFIELD_IS_MUTED_MASK) != 0;
+    if (node->is_ignored || isMuted)
+        display->drawLine(x + 8, y + 8, x + 6 + display->getStringWidth(nodeName), y + 8);
+
+    // Last heard (age).
+    char timeStr[10];
+    uint32_t seconds = sinceLastSeen(node);
+    if (seconds == 0 || seconds == UINT32_MAX) {
+        snprintf(timeStr, sizeof(timeStr), "?");
+    } else {
+        uint32_t minutes = seconds / 60, hours = minutes / 60, days = hours / 24;
+        snprintf(timeStr, sizeof(timeStr), (days > 365 ? "?" : "%d%c"), (days ? days : hours ? hours : minutes),
+                 (days ? 'd' : hours ? 'h' : 'm'));
+    }
+    int lastHeardRight = x + columnWidth - 140;
+    display->drawString(lastHeardRight - display->getStringWidth(timeStr), y, timeStr);
+
+    // Signal strength bars (from SNR).
+    int bars = (node->snr > 5) ? 4 : (node->snr > 0) ? 3 : (node->snr > -5) ? 2 : (node->snr > -10) ? 1 : 0;
+    int barStartX = x + columnWidth - 115;
+    int barStartY = y + 1 + (FONT_HEIGHT_SMALL / 2) + 2;
+    for (int b = 0; b < bars; b++)
+        display->fillRect(barStartX + b * 3, barStartY - (b * 2), 2, b * 2);
+
+    // Hop count.
+    if (node->has_hops_away && node->hops_away > 0) {
+        char hopStr[6];
+        snprintf(hopStr, sizeof(hopStr), "[%d]", node->hops_away);
+        int hopRight = x + columnWidth - 70;
+        display->drawString(hopRight - display->getStringWidth(hopStr), y, hopStr);
+    }
+
+    // Distance (great-circle from our node), unit-aware; blank if either lacks a fix.
+    char distStr[10] = "";
+    meshtastic_NodeInfoLite *ourNode = nodeDB->getMeshNode(nodeDB->getNodeNum());
+    if (nodeDB->hasValidPosition(ourNode) && nodeDB->hasValidPosition(node)) {
+        double lat1 = ourNode->position.latitude_i * 1e-7, lon1 = ourNode->position.longitude_i * 1e-7;
+        double lat2 = node->position.latitude_i * 1e-7, lon2 = node->position.longitude_i * 1e-7;
+        double dLat = (lat2 - lat1) * DEG_TO_RAD, dLon = (lon2 - lon1) * DEG_TO_RAD;
+        double a = sin(dLat / 2) * sin(dLat / 2) +
+                   cos(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) * sin(dLon / 2) * sin(dLon / 2);
+        double km = 6371.0 * 2 * atan2(sqrt(a), sqrt(1 - a));
+        if (config.display.units == meshtastic_Config_DisplayConfig_DisplayUnits_IMPERIAL) {
+            double mi = km * 0.621371;
+            if (mi < 0.1)
+                snprintf(distStr, sizeof(distStr), "%dft", (int)(mi * 5280));
+            else
+                snprintf(distStr, sizeof(distStr), "%dmi", (int)(mi + 0.5) > 999 ? 999 : (int)(mi + 0.5));
+        } else {
+            if (km < 1.0)
+                snprintf(distStr, sizeof(distStr), "%dm", (int)(km * 1000));
+            else
+                snprintf(distStr, sizeof(distStr), "%dkm", (int)(km + 0.5) > 999 ? 999 : (int)(km + 0.5));
+        }
+    }
+    if (distStr[0]) {
+        int distRight = x + columnWidth - 8;
+        display->drawString(distRight - display->getStringWidth(distStr), y, distStr);
+    }
+}
+
+void drawFreewiliNodes(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
+{
+    drawNodeListScreen(display, state, x, y, "Nodes", drawEntryNodes);
 }
 
 // FreeWili node "radar": you at center, every mesh node with a known position

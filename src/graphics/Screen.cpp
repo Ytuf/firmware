@@ -1091,7 +1091,22 @@ void Screen::setFrames(FrameFocus focus)
     }
 #endif
 
-#if defined(USE_EINK) || defined(FREEWILI)
+#if defined(FREEWILI)
+    // FreeWili: ONE combined node list (name + last-heard + signal + hops + distance)
+    // replaces the three near-identical single-metric frames — the 480 px screen is
+    // wide enough to show them all on one row.
+    if (!hiddenFrames.nodelist_lastheard) {
+        fsi.positions.nodelist_lastheard = numframes;
+        normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliNodes;
+        indicatorIcons.push_back(icon_nodes);
+    }
+    // FreeWili all-nodes radar map (self at center, peers at bearing/distance).
+    normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliNodeMap;
+    indicatorIcons.push_back(icon_compass);
+    // FreeWili WiFi wardrive survey (APs heard by the ESP32-C5 via MAIN).
+    normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliWifiSurvey;
+    indicatorIcons.push_back(icon_signal);
+#elif defined(USE_EINK)
     if (!hiddenFrames.nodelist_lastheard) {
         fsi.positions.nodelist_lastheard = numframes;
         normalFrames[numframes++] = graphics::NodeListRenderer::drawLastHeardScreen;
@@ -1107,14 +1122,6 @@ void Screen::setFrames(FrameFocus focus)
         normalFrames[numframes++] = graphics::NodeListRenderer::drawDistanceScreen;
         indicatorIcons.push_back(icon_distance);
     }
-#if defined(FREEWILI)
-    // FreeWili all-nodes radar map (self at center, peers at bearing/distance).
-    normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliNodeMap;
-    indicatorIcons.push_back(icon_compass);
-    // FreeWili WiFi wardrive survey (APs heard by the ESP32-C5 via MAIN).
-    normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliWifiSurvey;
-    indicatorIcons.push_back(icon_signal);
-#endif
 #endif
 #if HAS_GPS
 #ifdef USE_EINK

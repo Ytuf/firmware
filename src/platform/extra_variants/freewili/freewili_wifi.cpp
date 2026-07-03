@@ -247,13 +247,19 @@ class FreewiliWifi : public concurrency::OSThread
 
     void sendEnable()
     {
-        uint8_t f[6];
+        // 0xFA 0xCE | type | len=4 | 4-byte magic | cksum. The magic is high-entropy
+        // so MAIN's byte-stream enable detector can't be falsely triggered by
+        // ordinary GUI traffic. Must match MAIN (fwWifiRelay.cpp WIFI_ENABLE_MAGIC).
+        uint8_t f[9];
         f[0] = WIFI_SYNC1;
         f[1] = WIFI_SYNC2;
         f[2] = WIFI_TYPE_ENABLE;
-        f[3] = 1;    // len
-        f[4] = 0x01; // payload: enable
-        f[5] = (uint8_t)(f[2] + f[3] + f[4]);
+        f[3] = 4; // len
+        f[4] = 0x57;
+        f[5] = 0xA7;
+        f[6] = 0x2C;
+        f[7] = 0x6B;
+        f[8] = (uint8_t)(f[2] + f[3] + f[4] + f[5] + f[6] + f[7]);
         uart_write_blocking(FW_WIFI_UART, f, sizeof(f));
         g_freewili_wifi_tx_sends++;
     }

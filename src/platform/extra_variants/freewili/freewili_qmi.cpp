@@ -131,6 +131,16 @@ void __not_in_flash_func(__wrap_set_sys_clock_pll)(uint32_t vco_freq, uint post_
         s_fw_qmi_timing = t;
         fw_qmi_write_timing(t);
         __real_set_sys_clock_pll(vco_freq, post_div1, post_div2);
+        // The arduino-pico core parks clk_peri on PLL_USB (48 MHz), which caps the
+        // hardware uart0 at ~3 Mbaud. Re-source clk_peri from PLL_SYS (= sys_clk)
+        // so uart0 can reach the 8 Mbaud MAIN<->Display link, exactly like the
+        // shipping Intrepid Display firmware. Every Display peripheral (ST7789 SPI,
+        // LoRa uart1, I2C) recomputes its divider from clock_get_hz(clk_peri) at
+        // init — which runs after this — so they adapt with no code change. (The
+        // flash is already back at speed via the QMI timing above, so this
+        // flash-resident call is safe from the RAM wrapper.)
+        if (target_hz > 60000000u)
+            clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, target_hz, target_hz);
     } else {
         // Lowering: the old (larger) divider stays in-spec during the
         // switch; retune afterwards.

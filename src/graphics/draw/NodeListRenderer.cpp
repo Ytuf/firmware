@@ -11,6 +11,9 @@
 #include "graphics/images.h"
 #include "meshUtils.h"
 #include <algorithm>
+#if defined(FREEWILI)
+#include "platform/extra_variants/freewili/freewili_wifi.h"
+#endif
 
 // Forward declarations for functions defined in Screen.cpp
 namespace graphics
@@ -910,6 +913,43 @@ void drawFreewiliNodeMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_
     }
     display->setColor(WHITE);
     display->setTextAlignment(TEXT_ALIGN_LEFT);
+}
+
+// WiFi wardrive survey: APs heard by the ESP32-C5 (forwarded by MAIN over
+// UART0), strongest-first with signal + channel/band.
+void drawFreewiliWifiSurvey(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
+{
+    display->clear();
+    graphics::drawCommonHeader(display, x, y, "WiFi Survey");
+
+    const int16_t H = display->getHeight();
+    const int16_t headerH = FONT_HEIGHT_SMALL - 1;
+    int16_t ty = y + headerH + 1;
+
+    display->setFont(FONT_SMALL);
+    display->setColor(WHITE);
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+
+    FreewiliWifiAp aps[FW_WIFI_MAX_APS];
+    size_t n = freewiliWifiGetAps(aps, FW_WIFI_MAX_APS);
+    if (n == 0) {
+        display->drawString(x + 4, ty, "Scanning... (no APs yet)");
+        return;
+    }
+    std::sort(aps, aps + n, [](const FreewiliWifiAp &a, const FreewiliWifiAp &b) { return a.rssi > b.rssi; });
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%u AP%s heard", (unsigned)n, n == 1 ? "" : "s");
+    display->drawString(x + 4, ty, buf);
+    ty += FONT_HEIGHT_SMALL;
+
+    for (size_t i = 0; i < n && ty < H - FONT_HEIGHT_SMALL; i++) {
+        const FreewiliWifiAp &a = aps[i];
+        const char *nm = a.ssid[0] ? a.ssid : "(hidden)";
+        snprintf(buf, sizeof(buf), "%-16.16s %ddBm ch%u/%s", nm, a.rssi, a.channel, a.band ? "5G" : "2.4");
+        display->drawString(x + 4, ty, buf);
+        ty += FONT_HEIGHT_SMALL;
+    }
 }
 #endif
 

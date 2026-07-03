@@ -56,6 +56,8 @@ void drawNodeListWithCompasses(OLEDDisplay *display, OLEDDisplayUiState *state, 
 #if defined(FREEWILI)
 // FreeWili all-nodes radar map (center = me, blips at bearing/distance).
 void drawFreewiliNodeMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
+// FreeWili WiFi wardrive survey (APs heard via the ESP32-C5, forwarded by MAIN).
+void drawFreewiliWifiSurvey(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 #endif
 
 // Utility functions

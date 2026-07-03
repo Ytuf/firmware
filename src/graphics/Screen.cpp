@@ -1111,6 +1111,9 @@ void Screen::setFrames(FrameFocus focus)
     // FreeWili all-nodes radar map (self at center, peers at bearing/distance).
     normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliNodeMap;
     indicatorIcons.push_back(icon_compass);
+    // FreeWili WiFi wardrive survey (APs heard by the ESP32-C5 via MAIN).
+    normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliWifiSurvey;
+    indicatorIcons.push_back(icon_signal);
 #endif
 #endif
 #if HAS_GPS

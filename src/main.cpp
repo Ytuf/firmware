@@ -953,6 +953,8 @@ void setup()
     freewili_register_compass(); // BMM350 mag + BMI323 accel -> screen->setHeading()
     extern void freewiliGpsInjectFallback();
     freewiliGpsInjectFallback(); // static booth/lab position so the map works with no GPS lock
+    extern void freewili_register_wifi();
+    freewili_register_wifi(); // UART0 reader for ESP32-C5 WiFi scans forwarded by MAIN
 #endif
     if (inputBroker)
         inputBroker->Init();

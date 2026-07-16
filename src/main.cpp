@@ -2,6 +2,8 @@
 #if defined(FREEWILI)
 #include "buzz/BuzzerFeedbackThread.h"
 extern "C" void freewili_set_tz(const char *tz);
+extern "C" void freewili_fault_init(void);
+extern "C" void freewili_fault_tick(void);
 #endif
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
@@ -311,6 +313,11 @@ void printInfo()
 #ifndef PIO_UNIT_TESTING
 void setup()
 {
+#if defined(FREEWILI) && defined(PICO_RP2350)
+    // Install the fault catcher FIRST so any fault (even during init) is captured
+    // to g_fw_fault instead of silently locking up. Root-causing the idle lockup.
+    freewili_fault_init();
+#endif
 
     // initialize power HAL layer as early as possible
     powerHAL_init();
@@ -1194,6 +1201,10 @@ void loop()
 #if defined(FREEWILI) && defined(USE_TINYUSB_HOST)
     // Task 3 spike: cooperatively drive the native USB host stack (GPS reader).
     freewiliUsbHostService();
+#endif
+
+#if defined(FREEWILI) && defined(PICO_RP2350)
+    freewili_fault_tick(); // clear the recover-reboot guard once uptime proves recovery
 #endif
 
 #if defined(FREEWILI)

@@ -1,7 +1,10 @@
 // FreeWili WiFi survey (wardrive) — Display side. See freewili_wifi.h.
 //
-// MAIN reports each discovered WiFi AP to the Display as a OneWili text
-// event (fwMenuWifi.cpp addEventData("wifiscan", ...)), framed as:
+// The Display drives the whole survey itself over wilibsp: it periodically
+// calls ow_wireless_wifi_on_scan_for_access_points() to kick a scan (the ESP
+// scan is one-shot, so this repeats on a timer), then drains the resulting
+// events. MAIN reports each discovered WiFi AP to the Display as a OneWili
+// text event (fwMenuWifi.cpp addEventData("wifiscan", ...)), framed as:
 //   [*wifiscan <ts> <seq> <bssid> <rssi> <channel> <band> <authmode> <ssid> <ok>]
 // over the shared UART0 FwGUI link (opcode 0x5D). This replaces the old
 // bespoke "0xFA 0xCE" relay, which MAIN no longer sends. wilibsp's
@@ -17,6 +20,7 @@
 
 #include "concurrency/OSThread.h"
 #include "freewili_wifi_parse.h"
+#include "onewili.h"
 #include "onewili_fwgui.h"
 #include <Arduino.h>
 #include <string.h>
@@ -35,6 +39,10 @@ volatile uint32_t g_freewili_wifi_ap_count = 0; // live APs in the table
 volatile int32_t g_freewili_wifi_last_rssi = 0;
 volatile uint32_t g_freewili_wifi_uart_ok = 0;  // 1 = ow_open_fwgui succeeded
 volatile uint32_t g_freewili_wifi_rx_drops = 0; // wilibsp stream FIFO drops (ow_fwgui_dropped_frames)
+volatile int32_t g_freewili_wifi_scan_status = 0; // ow_status of the last scan-kick call
+
+// The ESP scan is one-shot per command, so re-kick it on a timer to keep the survey filling.
+static constexpr uint32_t FW_WIFI_SCAN_INTERVAL_MS = 5000;
 
 static ow_device s_owDev;
 static FreewiliWifiAp s_aps[FW_WIFI_MAX_APS];
@@ -152,18 +160,26 @@ class FreewiliWifi : public concurrency::OSThread
   protected:
     int32_t runOnce() override
     {
+        if (g_freewili_wifi_uart_ok && millis() >= m_nextScanMs) {
+            g_freewili_wifi_scan_status = (int32_t)ow_wireless_wifi_on_scan_for_access_points(&s_owDev);
+            m_nextScanMs = millis() + FW_WIFI_SCAN_INTERVAL_MS;
+        }
+
         char id[32];
         char args[200];
         while (ow_poll_text_line(&s_owDev, id, sizeof(id), args, sizeof(args)) == 1) {
             if (strcmp(id, "wifiscan") != 0)
                 continue; // not our event -- some other menu's event, ignore
-            FreewiliWifiAp parsed;
+            FreewiliWifiAp parsed{};
             if (parseWifiscanEvent(args, parsed))
                 upsertAp(parsed, millis());
         }
         g_freewili_wifi_rx_drops = ow_fwgui_dropped_frames();
         return 20;
     }
+
+  private:
+    uint32_t m_nextScanMs = 0; // fires immediately on the first tick
 };
 
 FreewiliWifi *s_wifi = nullptr;

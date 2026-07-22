@@ -301,12 +301,38 @@ static void initIOExpanderPicoSDK()
 }
 
 extern "C" {
-volatile int16_t  g_touch_raw_x          __attribute__((used)) = -1;
-volatile int16_t  g_touch_raw_y          __attribute__((used)) = -1;
-volatile int16_t  g_touch_screen_x       __attribute__((used)) = -1;
-volatile int16_t  g_touch_screen_y       __attribute__((used)) = -1;
-volatile uint32_t g_touch_i2c_fail_count __attribute__((used)) = 0;
-volatile uint32_t g_touch_i2c_ok_count   __attribute__((used)) = 0;
+volatile int16_t  g_touch_raw_x            __attribute__((used)) = -1;
+volatile int16_t  g_touch_raw_y            __attribute__((used)) = -1;
+volatile int16_t  g_touch_screen_x         __attribute__((used)) = -1;
+volatile int16_t  g_touch_screen_y         __attribute__((used)) = -1;
+volatile uint32_t g_touch_i2c_fail_count   __attribute__((used)) = 0;
+volatile uint32_t g_touch_i2c_ok_count     __attribute__((used)) = 0;
+volatile uint32_t g_touch_i2c_recover_count __attribute__((used)) = 0; // bus recoveries fired
+}
+
+// Recover a wedged i2c1 controller/bus. A timed-out or NACK'd touch transaction
+// can leave the DW_apb_i2c in an abort/restart-pending state (STOP never issued)
+// and the FT5316 clock-stretching, after which every touch read fails forever.
+// i2c_init() hardware-resets the controller (clears the held state); re-assert the
+// pinmux + pull-ups, then pulse SCREEN_TOUCH_RST so the FT5316 releases the bus and
+// re-boots. Called from TFTDisplay::getTouch after N consecutive failures so touch
+// self-heals instead of staying dead until reboot. Speed stays 400 kHz (in-spec).
+extern "C" void freewili_touch_bus_recover(void)
+{
+    i2c_init(i2c1, 400000);
+    gpio_set_function(26, GPIO_FUNC_I2C);
+    gpio_set_function(27, GPIO_FUNC_I2C);
+    gpio_pull_up(26);
+    gpio_pull_up(27);
+#ifdef SCREEN_TOUCH_RST
+    gpio_set_dir(SCREEN_TOUCH_RST, GPIO_OUT);
+    gpio_put(SCREEN_TOUCH_RST, false);
+    sleep_ms(1);
+    gpio_put(SCREEN_TOUCH_RST, true);
+    sleep_ms(10);
+    uint8_t mode[2] = {0x00, 0x00}; // FT5316 MODE_SWITCH -> normal operating mode
+    i2c_write_timeout_us(i2c1, TOUCH_ADDRESS, mode, 2, false, 3000);
+#endif
 }
 
 // newlib's first setenv() crashes on this arduino-pico build (touches a

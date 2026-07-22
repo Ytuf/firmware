@@ -19,6 +19,7 @@
 #if defined(FREEWILI)
 
 #include "concurrency/OSThread.h"
+#include "freewili_sd.h"
 #include "freewili_wifi_parse.h"
 #include "onewili.h"
 #include "onewili_fwgui.h"
@@ -83,6 +84,10 @@ static void upsertAp(const FreewiliWifiAp &parsed, uint32_t now)
             freeSlot = i;
         }
     }
+    // The only point that still knows this BSSID was not already in the table.
+    // Hooking the survey log anywhere downstream would re-append every AP on
+    // every scan, forever.
+    const bool isNew = (slot < 0);
     if (slot < 0)
         slot = (freeSlot >= 0) ? freeSlot : oldest;
     if (slot < 0)
@@ -101,6 +106,9 @@ static void upsertAp(const FreewiliWifiAp &parsed, uint32_t now)
     g_freewili_wifi_frames++;
     g_freewili_wifi_last_rssi = ap.rssi;
     g_freewili_wifi_ap_count = liveApCount();
+
+    if (isNew)
+        freewili_sd_note_ap(ap);   // staging memcpy only; the flush is in runOnce
 }
 
 size_t freewiliWifiGetAps(FreewiliWifiAp *out, size_t max)
@@ -161,13 +169,21 @@ class FreewiliWifi : public concurrency::OSThread
     int32_t runOnce() override
     {
         if (g_freewili_wifi_uart_ok && millis() >= m_nextScanMs) {
-            g_freewili_wifi_scan_status = (int32_t)ow_wireless_wifi_on_scan_for_access_points(&s_owDev);
+            // Fire-and-forget: never block this cooperative thread waiting for MAIN's
+            // ack. The scan result arrives as async [*wifiscan] events. "w\\w\\s" is the
+            // wireless>wifi>scan menu path (ow_wireless_wifi_on_scan_for_access_points).
+            g_freewili_wifi_scan_status = (int32_t)ow_send_cmd_noreply(&s_owDev, "w\\w\\s");
             m_nextScanMs = millis() + FW_WIFI_SCAN_INTERVAL_MS;
         }
 
         char id[32];
         char args[200];
-        while (ow_poll_text_line(&s_owDev, id, sizeof(id), args, sizeof(args)) == 1) {
+        // Cap events per tick. MAIN streams the FwGUI link continuously, so an
+        // unbounded drain never returns and starves the cooperative scheduler
+        // (freezes the whole UI). 32 covers a full scan's APs with margin; the
+        // rest is picked up on the next tick.
+        int budget = 32;
+        while (budget-- > 0 && ow_poll_text_line(&s_owDev, id, sizeof(id), args, sizeof(args)) == 1) {
             if (strcmp(id, "wifiscan") != 0)
                 continue; // not our event -- some other menu's event, ignore
             FreewiliWifiAp parsed{};
@@ -175,6 +191,9 @@ class FreewiliWifi : public concurrency::OSThread
                 upsertAp(parsed, millis());
         }
         g_freewili_wifi_rx_drops = ow_fwgui_dropped_frames();
+        // Only place that may block on the SDFS link: the event queue above is
+        // drained first, so nothing is half-received while we round-trip.
+        freewili_sd_service();
         return 20;
     }
 

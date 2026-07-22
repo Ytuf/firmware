@@ -12,6 +12,9 @@
 #include "meshUtils.h"
 #include <algorithm>
 #if defined(FREEWILI)
+#include "platform/extra_variants/freewili/freewili_gps.h"
+#include "platform/extra_variants/freewili/freewili_map.h"
+#include "platform/extra_variants/freewili/freewili_panel.h"
 #include "platform/extra_variants/freewili/freewili_wifi.h"
 #endif
 
@@ -1001,6 +1004,55 @@ void drawFreewiliNodeMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_
     }
     display->setColor(WHITE);
     display->setTextAlignment(TEXT_ALIGN_LEFT);
+}
+
+// Task 6b: color OSM map carousel frame. With a GPS fix (or the bench force-fix)
+// it takes over the panel and draws the SD-backed color tiles directly (Tasks
+// 4/5/6a); with no fix it falls back to the normal mono "Waiting for GPS fix".
+// The tile service runs from main.cpp (`if (g_fwmap_active) freewili_map_service()`);
+// Screen::runOnce() clears the takeover + repaints mono when the carousel leaves.
+// g_freewili_gps_last_{lat,lon}_i live in freewili_gps.cpp but aren't in a header.
+extern "C" {
+extern volatile int32_t g_freewili_gps_last_lat_i;
+extern volatile int32_t g_freewili_gps_last_lon_i;
+}
+void drawFreewiliMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
+{
+    // Only the CURRENT frame may own the panel. During a carousel slide drawFrame()
+    // calls both the outgoing and incoming callbacks; gating on currentFrame means
+    // the non-current map callback returns here and never re-asserts takeover after
+    // runOnce cleared it (or renders the map early while sliding in).
+    if ((int32_t)state->currentFrame != g_fwmap_frame_index)
+        return;
+
+    if (freewiliGpsHasFix()) {
+        // 6b-rev: region-aware takeover. Keep the mono TOP BANNER current in the
+        // mono buffer every frame so the region-aware flush paints it above the map
+        // band. Draw nothing else into the mono buffer -- the band belongs to the
+        // color map, and the bottom page-indicator is drawn by the UI library.
+        graphics::drawCommonHeader(display, x, y, "Map");
+        if (!g_fwmap_active) { // just entered the map with a fix -> render once
+            if (g_freewili_gps_last_lat_i != 0 || g_freewili_gps_last_lon_i != 0) {
+                g_fwmap_center_lat_i = g_freewili_gps_last_lat_i; // real fix -> center on it
+                g_fwmap_center_lon_i = g_freewili_gps_last_lon_i;
+            } // else keep g_fwmap_center default (Mountain View) until a fix lands
+            freewili_map_render(); // sets g_freewili_color_takeover=1, g_fwmap_active=1
+        }
+        // tiles are serviced by main.cpp's `if (g_fwmap_active) freewili_map_service();`
+    } else { // current frame, no fix -> normal mono UI (framework already cleared buffer)
+        // Fix-loss edge: if the map was actively drawing color (takeover on) and the fix
+        // just dropped, request a full mono repaint so Screen::runOnce() erases the directly-
+        // drawn color band (the diff-flush can't -- it never touched that band). Signal it via
+        // the runOnce flag ONLY, never display(true) from here: this callback runs inside the
+        // flush/update path, so a nested display() would be reentrant on spi1.
+        if (g_fwmap_active)
+            g_fwmap_force_repaint = true;
+        g_freewili_color_takeover = false;
+        g_fwmap_active = 0;
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(x + display->getWidth() / 2, y + display->getHeight() / 2, "Waiting for GPS fix");
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+    }
 }
 
 // WiFi wardrive survey: APs heard by the ESP32-C5 (forwarded by MAIN over

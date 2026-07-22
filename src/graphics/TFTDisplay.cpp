@@ -434,6 +434,7 @@ static LGFX *tft = nullptr;
 #include "hardware/i2c.h"
 #include "pico/time.h"
 #include <Wire.h>
+#include "platform/extra_variants/freewili/freewili_panel.h"
 
 #define TFT_BLACK 0x0000
 #define TFT_WHITE 0xFFFF
@@ -441,7 +442,7 @@ static LGFX *tft = nullptr;
 #define TFT_GREEN 0x07E0
 #define TFT_BLUE  0x001F
 
-class LGFX {
+class LGFX : public FreeWiliPanel {
     bool _inited = false;
 
     void spiCmd(uint8_t c) {
@@ -479,21 +480,26 @@ public:
         spiCmd(0x29); sleep_ms(100);   // Display ON
     }
 
-    void fillScreen(uint16_t color) {
+    void fillScreen(uint16_t color) override {
         spiCmd(0x2A); spiDat8(0); spiDat8(0); spiDat8(0x01); spiDat8(0xDF);
         spiCmd(0x2B); spiDat8(0); spiDat8(0); spiDat8(0x01); spiDat8(0xDF);
         spiCmd(0x2C);
+        // Bulk row writes instead of 480*480 individual 2-byte spi_write_blocking calls
+        // (that per-call overhead made a full clear take ~1s, which showed as a leave lag).
+        // rowbuf is static and thus single-core-only: it must be touched from the flush/
+        // panel core alone, mirroring the spi1-is-core1's-exclusive-domain invariant.
+        static uint8_t rowbuf[480 * 2];
         uint8_t hi = color >> 8, lo = color & 0xFF;
-        uint8_t px[] = {hi, lo};
+        for (int i = 0; i < 480; i++) { rowbuf[i * 2] = hi; rowbuf[i * 2 + 1] = lo; }
         gpio_put(ST7789_RS, 1); gpio_put(ST7789_CS, 0);
-        for (uint32_t i = 0; i < 480UL * 480; i++)
-            spi_write_blocking(spi1, px, 2);
+        for (int y = 0; y < 480; y++)
+            spi_write_blocking(spi1, rowbuf, sizeof(rowbuf));
         gpio_put(ST7789_CS, 1);
     }
 
     void clear() { fillScreen(0x0000); }
 
-    void pushRect(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t *data) {
+    void pushRect(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t *data) override {
         uint16_t x1 = x, x2 = x + w - 1, y1 = y, y2 = y + h - 1;
         spiCmd(0x2A); spiDat8(x1>>8); spiDat8(x1); spiDat8(x2>>8); spiDat8(x2);
         spiCmd(0x2B); spiDat8(y1>>8); spiDat8(y1); spiDat8(y2>>8); spiDat8(y2);
@@ -524,6 +530,11 @@ public:
 };
 
 static LGFX *tft = nullptr;
+
+// Panel takeover seam (see freewili_panel.h): lets a color screen (e.g. the OSM map)
+// draw directly to the live panel, bypassing the mono->color flush in TFTDisplay::display().
+volatile bool g_freewili_color_takeover = false;
+FreeWiliPanel *freewiliGetTFT() { return tft; }
 
 #elif defined(ST7789_CS)
 #include <LovyanGFX.hpp> // Graphics and font library for ST7735 driver chip
@@ -1293,8 +1304,28 @@ TFTDisplay::~TFTDisplay()
 // Write the buffer to the display memory
 void TFTDisplay::display(bool fromBlank)
 {
-    if (fromBlank)
+    if (fromBlank) {
+#if defined(FREEWILI)
+        if (g_freewili_color_takeover) {
+            // Region-aware takeover: the color map owns the band
+            // [g_fwmap_band_top, g_fwmap_band_bottom). A whole-panel fillScreen
+            // would erase the map, so black ONLY the two mono strips (top banner +
+            // bottom page-indicator) here; the flush loop below repaints them and
+            // skips the band entirely.
+            for (int32_t i = 0; i < (int32_t)displayWidth; i++)
+                linePixelBuffer[i] = 0; // TFT_BLACK, byte-order agnostic
+            for (int32_t sy = 0; sy < g_fwmap_band_top && sy < (int32_t)displayHeight; sy++)
+                tft->pushRect(0, sy, displayWidth, 1, linePixelBuffer);
+            for (int32_t sy = (g_fwmap_band_bottom < 0 ? 0 : g_fwmap_band_bottom);
+                 sy < (int32_t)displayHeight; sy++)
+                tft->pushRect(0, sy, displayWidth, 1, linePixelBuffer);
+        } else {
+            tft->fillScreen(TFT_BLACK);
+        }
+#else
         tft->fillScreen(TFT_BLACK);
+#endif
+    }
 
     concurrency::LockGuard g(spiLock);
 
@@ -1313,6 +1344,17 @@ void TFTDisplay::display(bool fromBlank)
 
     y = 0;
     while (y < displayHeight) {
+#if defined(FREEWILI)
+        // Region-aware takeover: the color map owns the band, so never push any row
+        // in [g_fwmap_band_top, g_fwmap_band_bottom). Jump y straight to band_bottom;
+        // banner rows (y < band_top) and page-indicator rows (y >= band_bottom) push
+        // normally (diff or fromBlank). The push only happens in Step 4 below, which
+        // is now unreachable for band rows.
+        if (g_freewili_color_takeover && (int32_t)y >= g_fwmap_band_top && (int32_t)y < g_fwmap_band_bottom) {
+            y = (uint32_t)g_fwmap_band_bottom;
+            continue;
+        }
+#endif
         y_byteIndex = (y / 8) * displayWidth;
         y_byteMask = (1 << (y & 7));
 
@@ -1537,6 +1579,12 @@ bool TFTDisplay::hasTouch(void)
 #endif
 }
 
+#if defined(FREEWILI)
+// Defined in the FreeWili variant (variant.cpp): clears a wedged i2c1 controller
+// and re-pulses the FT5316 reset so touch self-heals after a bus wedge.
+extern "C" void freewili_touch_bus_recover(void);
+#endif
+
 bool TFTDisplay::getTouch(int16_t *x, int16_t *y)
 {
 #ifdef RAK14014
@@ -1552,16 +1600,34 @@ bool TFTDisplay::getTouch(int16_t *x, int16_t *y)
 #elif defined(FREEWILI)
     // FT5316 on I2C1 @ 0x38. Use pico-sdk i2c_*_blocking_until with 2 ms deadline;
     // arduino-pico's Wire endTransmission can block for seconds and freezes the UI.
+    // The bus is shared (BQ27441, IO-expander, audio codec) with no lock and no
+    // recovery; a timed-out/NACK'd transaction leaves the controller in an
+    // abort/held state and touch stays dead until reboot. After N consecutive
+    // failures, recover the bus so touch self-heals.
     extern volatile uint32_t g_touch_i2c_fail_count;
     extern volatile uint32_t g_touch_i2c_ok_count;
+    extern volatile uint32_t g_touch_i2c_recover_count;
+    static uint8_t s_touch_consec_fail = 0;
+    static const uint8_t TOUCH_RECOVER_AFTER = 6;
+
     uint8_t reg = 0x02; // TD_STATUS
     int wrote = i2c_write_blocking_until(i2c1, TOUCH_ADDRESS, &reg, 1, true,
                                          make_timeout_time_us(2000));
-    if (wrote != 1) { g_touch_i2c_fail_count++; return false; }
     uint8_t buf[5];
-    int read = i2c_read_blocking_until(i2c1, TOUCH_ADDRESS, buf, 5, false,
+    int read = -1;
+    if (wrote == 1)
+        read = i2c_read_blocking_until(i2c1, TOUCH_ADDRESS, buf, 5, false,
                                        make_timeout_time_us(2000));
-    if (read != 5) { g_touch_i2c_fail_count++; return false; }
+    if (wrote != 1 || read != 5) {
+        g_touch_i2c_fail_count++;
+        if (++s_touch_consec_fail >= TOUCH_RECOVER_AFTER) {
+            s_touch_consec_fail = 0;
+            g_touch_i2c_recover_count++;
+            freewili_touch_bus_recover();
+        }
+        return false;
+    }
+    s_touch_consec_fail = 0;
     g_touch_i2c_ok_count++;
     {
         uint8_t touchPoints = buf[0] & 0x0F;

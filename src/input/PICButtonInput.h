@@ -13,13 +13,16 @@ class PICButtonInput : public Observable<const InputEvent *>, public concurrency
     int32_t runOnce() override;
 
   private:
-    // PIC UART protocol (rpPICComm, freewilimain rmpLib/rpPICComm.cpp as of
-    // 2026-03-27). Frame: 0xB0 0x1D | len_lo len_hi | event | payload | ck_lo
-    // ck_hi. Checksum = sum of every byte from sync1 through the last payload
-    // byte, 16-bit. Two event types share the link: buttons (0xB5, len 2) and
-    // battery (0xB1, len sizeof(batt_status)). We only consume buttons; the
-    // battery payload is skipped to stay frame-aligned (Meshtastic reads the
-    // BQ27441 directly over I2C).
+    // PIC UART protocol (rpPICComm, freewilimain rmpLib/rpPICComm.cpp). Frame:
+    // 0xB0 0x1D | len_lo len_hi | event | payload | ck_lo ck_hi. Checksum = sum
+    // of every byte from sync1 through the last payload byte, 16-bit. The PIC
+    // streams ONE unified status frame autonomously: event 0xB2 (STATUS), payload
+    // = 20-byte device_status_t whose first uint16 (bytes 0..1, little-endian) is
+    // the button bitmask. (The old split protocol — buttons 0xB5/len2, battery
+    // 0xB1 — is obsolete; the PIC was unified to 0xB2 and this parser was never
+    // updated, which is why every frame was discarded and buttons never worked.)
+    // We only consume the button bitmask; the rest of the status payload is
+    // skipped to stay frame-aligned (Meshtastic reads the BQ27441 over I2C).
     enum PicRxState {
         WAIT_SYNC1,
         WAIT_SYNC2,
@@ -45,8 +48,8 @@ class PICButtonInput : public Observable<const InputEvent *>, public concurrency
 
     static const uint8_t PIC_SYNC1 = 0xB0;
     static const uint8_t PIC_SYNC2 = 0x1D;
-    static const uint8_t PIC_EVENT_BUTTONS = 0xB5;
-    static const uint8_t PIC_EVENT_BATT = 0xB1;
+    static const uint8_t PIC_EVENT_STATUS = 0xB2; // unified device_status_t frame
+    static const uint16_t PIC_STATUS_LEN = 20;    // sizeof(device_status_t), buttons at [0..1]
 
     // Button bit positions (match rpPICComm buttonsstates_t exactly).
     static const uint16_t BTN_GREY = (1 << 0);

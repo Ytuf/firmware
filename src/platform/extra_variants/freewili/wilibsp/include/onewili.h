@@ -24,10 +24,10 @@ typedef struct ow_transport {
 } ow_transport;
 
 #ifndef OW_CMD_MAX
-#define OW_CMD_MAX 1024
+#define OW_CMD_MAX 256
 #endif
 #ifndef OW_RESP_MAX
-#define OW_RESP_MAX 4096
+#define OW_RESP_MAX 512
 #endif
 #ifndef OW_DEFAULT_TIMEOUT_MS
 #define OW_DEFAULT_TIMEOUT_MS 5000
@@ -57,6 +57,11 @@ void ow_close(ow_device* dev);
  * Returns 1 = filled, 0 = none pending, negative = -(ow_status). */
 int ow_poll_text_line(ow_device* dev, char* id, size_t id_cap,
                       char* args, size_t args_cap);
+
+/* Send a command without waiting for its response (fire-and-forget), so a
+ * caller in a cooperative loop never blocks on the reply. The response frame
+ * is later drained and dropped by ow_poll_text_line. */
+ow_status ow_send_cmd_noreply(ow_device* dev, const char* cmd);
 
 /* High. Sets a GPIO high.  Wire: i\g\s */
 ow_status ow_io_gpio_set_io_high(ow_device* dev, int32_t pin);

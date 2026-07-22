@@ -30,6 +30,17 @@
 #include <power/PowerHAL.h>
 #include <vector>
 
+#if defined(FREEWILI)
+// SD-backed persistence: internal-flash LittleFS is disabled on this port (hangs
+// on write), so config (which carries the keypair) is stored on the microSD card
+// over SDFS. saveProto/loadProto route the config file through here.
+#include "platform/extra_variants/freewili/freewili_persist.h"
+static inline bool fwPersistFile(const char *filename)
+{
+    return filename && strcmp(filename, configFileName) == 0;
+}
+#endif
+
 #ifdef ARCH_ESP32
 #if HAS_WIFI
 #include "mesh/wifi/WiFiAPClient.h"
@@ -303,43 +314,55 @@ NodeDB::NodeDB()
     // Acceptable for dev; production builds MUST define FW2_PER_UNIT_KEYPAIR
     // (see the freewili-production variant) to derive a distinct keypair from
     // the RP2350 factory-unique chip ID instead.
+    // With SD-backed persistence (saveProto/loadProto -> microSD), loadFromDisk()
+    // above may have already restored config.security (the keypair) from the card.
+    // Keep a persisted key; only mint the build-time fallback when none exists yet
+    // (first boot, or no card). This makes a rotated key stick across reboots.
+    const bool fwKeyLoaded = (config.security.private_key.size == 32 && config.security.public_key.size == 32);
+    if (!fwKeyLoaded) {
 #if defined(FW2_PER_UNIT_KEYPAIR)
-    // Derive privkey from the RP2350's factory-guaranteed unique 64-bit
-    // board ID. Each unit gets a deterministic but distinct keypair without
-    // standing up per-unit factory provisioning infrastructure (no secret
-    // injection step, no per-device build, no key escrow). Curve25519 will
-    // clamp whatever bytes we hand it, so any reasonable 8 -> 32 expansion
-    // works as the seed; we avoid pulling in a real SHA dependency by using
-    // a simple repeated-XOR expansion of the 8 UID bytes.
-    pico_unique_board_id_t uid;
-    pico_get_unique_board_id(&uid);
-    uint8_t seed[32];
-    for (int i = 0; i < 32; i++) {
-        seed[i] = uid.id[i % 8] ^ (uint8_t)(i * 0xA7); // arbitrary const, unique-per-unit
-    }
-    memcpy(config.security.private_key.bytes, seed, 32);
+        // Derive privkey from the RP2350's factory-guaranteed unique 64-bit
+        // board ID. Each unit gets a deterministic but distinct keypair without
+        // standing up per-unit factory provisioning infrastructure (no secret
+        // injection step, no per-device build, no key escrow). Curve25519 will
+        // clamp whatever bytes we hand it, so any reasonable 8 -> 32 expansion
+        // works as the seed; we avoid pulling in a real SHA dependency by using
+        // a simple repeated-XOR expansion of the 8 UID bytes.
+        pico_unique_board_id_t uid;
+        pico_get_unique_board_id(&uid);
+        uint8_t seed[32];
+        for (int i = 0; i < 32; i++) {
+            seed[i] = uid.id[i % 8] ^ (uint8_t)(i * 0xA7); // arbitrary const, unique-per-unit
+        }
+        memcpy(config.security.private_key.bytes, seed, 32);
 #else
-    static const uint8_t FW2_FIXED_PRIVKEY[32] = {
-        0xfc, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
-        0x1f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
-        0x2f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
-        0x3f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
-    };
-    memcpy(config.security.private_key.bytes, FW2_FIXED_PRIVKEY, 32);
+        static const uint8_t FW2_FIXED_PRIVKEY[32] = {
+            0xfc, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+            0x1f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+            0x2f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+            0x3f, 0xee, 0xd2, 0x02, 0x6c, 0x0f, 0xfe, 0xe0,
+        };
+        memcpy(config.security.private_key.bytes, FW2_FIXED_PRIVKEY, 32);
 #endif
-    config.security.private_key.size = 32;
-    // Derive the matching pubkey HERE. The region-gated keygen block below
-    // skips when config.lora.region == UNSET, which is "true on every boot"
-    // with the persistence stub - leaving public_key.size = 0 and silently
-    // breaking ALL PKI (encrypt setDH fails, peers send PKI_UNKNOWN_PUBKEY
-    // NAKs back, incoming DMs get dropped because our self_has_pubkey check
-    // in Router.cpp:458 sees size=0). Also write into owner.public_key so
-    // outgoing NodeInfo broadcasts include it.
-    crypto->regeneratePublicKey(config.security.public_key.bytes, config.security.private_key.bytes);
-    config.security.public_key.size = 32;
+        config.security.private_key.size = 32;
+        // Derive the matching pubkey HERE. The region-gated keygen block below
+        // skips when config.lora.region == UNSET, which is "true on every boot"
+        // with the persistence stub - leaving public_key.size = 0 and silently
+        // breaking ALL PKI (encrypt setDH fails, peers send PKI_UNKNOWN_PUBKEY
+        // NAKs back, incoming DMs get dropped because our self_has_pubkey check
+        // in Router.cpp:458 sees size=0).
+        crypto->regeneratePublicKey(config.security.public_key.bytes, config.security.private_key.bytes);
+        config.security.public_key.size = 32;
+    }
+    // Either path: publish our pubkey in outgoing NodeInfo broadcasts.
     owner.public_key.size = 32;
     memcpy(owner.public_key.bytes, config.security.public_key.bytes, 32);
     keyIsLowEntropy = false;
+    if (!fwKeyLoaded) {
+        // Persist the freshly-minted key so the next boot loads it from the card
+        // (exercising the load path) and so a later app-side key rotation sticks.
+        saveToDisk(SEGMENT_CONFIG);
+    }
 #endif
 
     if (!owner.is_licensed && config.lora.region != meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
@@ -1253,6 +1276,32 @@ LoadFileResult NodeDB::loadProto(const char *filename, size_t protoSize, size_t 
                                  void *dest_struct)
 {
     LoadFileResult state = LoadFileResult::OTHER_FAILURE;
+
+#if defined(FREEWILI)
+    if (fwPersistFile(filename)) {
+        // Read the proto blob off the microSD card (over SDFS to MAIN) and decode
+        // from RAM. protoSize is the max encoded size (LocalConfig ~ a few hundred B).
+        static uint8_t fwbuf[2048];
+        if (protoSize > sizeof(fwbuf)) {
+            LOG_ERROR("SD-persist: %s too big for buffer", filename);
+            return LoadFileResult::OTHER_FAILURE;
+        }
+        size_t n = freewili_persist_read(filename, fwbuf, sizeof(fwbuf));
+        if (n == 0) {
+            LOG_INFO("SD-persist: %s absent (first boot / no card)", filename);
+            return LoadFileResult::NO_FILESYSTEM; // caller installs defaults
+        }
+        memset(dest_struct, 0, objSize);
+        pb_istream_t stream = pb_istream_from_buffer(fwbuf, n);
+        if (!pb_decode(&stream, fields, dest_struct)) {
+            LOG_ERROR("SD-persist: decode %s failed: %s", filename, PB_GET_ERROR(&stream));
+            return LoadFileResult::DECODE_FAILED;
+        }
+        LOG_INFO("SD-persist: loaded %s (%u B)", filename, (unsigned)n);
+        return LoadFileResult::LOAD_SUCCESS;
+    }
+#endif
+
 #ifdef FSCom
     concurrency::LockGuard g(spiLock);
 
@@ -1536,9 +1585,28 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
                        bool fullAtomic)
 {
 #if defined(FREEWILI)
-    // RP2350 SMP + arduino-pico LittleFS hang on flash write; persistence disabled.
-    (void)filename; (void)protoSize; (void)fields; (void)dest_struct; (void)fullAtomic;
-    return true;
+    // Internal-flash LittleFS is disabled on this port (hangs on write). Encode
+    // to RAM and write the blob to the microSD card over SDFS for the files we
+    // persist (currently config, which carries the keypair). Everything else is a
+    // no-op that reports success, as before.
+    (void)fullAtomic;
+    if (!fwPersistFile(filename))
+        return true;
+    { // own scope so `stream` doesn't clash with the non-FREEWILI body below
+        static uint8_t fwbuf[2048];
+        if (protoSize > sizeof(fwbuf)) {
+            LOG_ERROR("SD-persist: %s too big for buffer", filename);
+            return false;
+        }
+        pb_ostream_t stream = pb_ostream_from_buffer(fwbuf, sizeof(fwbuf));
+        if (!pb_encode(&stream, fields, dest_struct)) {
+            LOG_ERROR("SD-persist: encode %s failed: %s", filename, PB_GET_ERROR(&stream));
+            return false;
+        }
+        bool ok = freewili_persist_write(filename, fwbuf, stream.bytes_written);
+        LOG_INFO("SD-persist: save %s %s (%u B)", filename, ok ? "ok" : "FAILED", (unsigned)stream.bytes_written);
+        return ok;
+    }
 #endif
 
     // do not try to save anything if power level is not safe. In many cases flash will be lock-protected
@@ -1698,9 +1766,23 @@ bool NodeDB::saveToDisk(int saveWhat)
     LOG_DEBUG("Save to disk %d", saveWhat);
 
 #if defined(FREEWILI)
-    // RP2350 SMP + arduino-pico LittleFS hang on flash write; persistence disabled.
-    (void)saveWhat;
-    return true;
+    // SD-backed persistence. Bypass saveToDiskNoRetry entirely: its FSCom.mkdir
+    // hits the broken internal-flash LittleFS. saveProto is redirected to the
+    // microSD card, so call it directly for the segments we persist. Only config
+    // (which carries the keypair) is persisted for now; other segments no-op.
+    bool ok = true;
+    if (saveWhat & SEGMENT_CONFIG) {
+        config.has_device = true;
+        config.has_display = true;
+        config.has_lora = true;
+        config.has_position = true;
+        config.has_power = true;
+        config.has_network = true;
+        config.has_bluetooth = true;
+        config.has_security = true;
+        ok &= saveProto(configFileName, meshtastic_LocalConfig_size, &meshtastic_LocalConfig_msg, &config);
+    }
+    return ok;
 #endif
 
     // do not try to save anything if power level is not safe. In many cases flash will be lock-protected

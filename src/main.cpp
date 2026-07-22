@@ -1,6 +1,8 @@
 #include "configuration.h"
 #if defined(FREEWILI)
 #include "buzz/BuzzerFeedbackThread.h"
+#include "platform/extra_variants/freewili/freewili_map.h"
+#include "platform/extra_variants/freewili/freewili_panel.h"
 extern "C" void freewili_set_tz(const char *tz);
 extern "C" void freewili_fault_init(void);
 extern "C" void freewili_fault_tick(void);
@@ -480,6 +482,13 @@ void setup()
 #elif defined(I2C_SDA1) && !defined(ARCH_RP2040)
     Wire1.begin(I2C_SDA1, I2C_SCL1);
 #elif WIRE_INTERFACES_COUNT == 2
+    // FreeWili 2 note: this begins Wire1 on the arduino-pico freewili2 variant's
+    // default PIN_WIRE1_SDA/SCL = GPIO2/3, which on this board are really the
+    // UART0 flow-control lines to MAIN, not an I2C bus (the only bus is I2C1 on
+    // GPIO26/27 = Wire). That is tolerated because it happens BEFORE the link is
+    // brought up: ow_open_fwgui later reclaims GPIO3 (owfw_claim_rts). Nothing
+    // may use Wire1 after that point -- once GPIO3 is held low as MAIN's CTS, any
+    // Wire1 transaction stretches that phantom bus forever and hangs setup().
     Wire1.begin();
 #endif
 
@@ -710,6 +719,14 @@ void setup()
 
 #ifdef ARCH_RP2040
     rp2040Setup();
+#endif
+
+#if defined(FREEWILI)
+    // Bring the SDFS link to MAIN up BEFORE NodeDB, whose constructor loads config
+    // (the keypair) from the microSD card via freewili_persist. The wardrive opens
+    // the same link later (idempotent); doing it here lets boot-time load work.
+    extern void freewili_persist_init();
+    freewili_persist_init();
 #endif
 
     // We do this as early as possible because this loads preferences from flash
@@ -961,7 +978,7 @@ void setup()
     extern void freewiliGpsInjectFallback();
     freewiliGpsInjectFallback(); // static booth/lab position so the map works with no GPS lock
     extern void freewili_register_wifi();
-    freewili_register_wifi(); // UART0 reader for ESP32-C5 WiFi scans forwarded by MAIN
+    freewili_register_wifi(); // wardrive: drives ESP32-C5 WiFi scans over the OneWili/wilibsp UART0 link
 #endif
     if (inputBroker)
         inputBroker->Init();
@@ -1196,6 +1213,13 @@ void loop()
     }
     g_loop_last_ms = _now_ms;
     g_loop_iter_count++;
+
+    // Color map covering-grid tile service: the carousel frame callback starts a
+    // render (sets g_fwmap_active); service() then draws one covering tile per loop
+    // tick while the map owns the panel.
+    if (g_fwmap_active) {
+        freewili_map_service();
+    }
 #endif
 
 #if defined(FREEWILI) && defined(USE_TINYUSB_HOST)

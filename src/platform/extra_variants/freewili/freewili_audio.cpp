@@ -61,8 +61,15 @@ extern "C" bool freewili_audio_init(void)
 {
     if (s_audio_ready) return true;
 
-    // Wire1 was brought up earlier (BQ27441 path); re-asserting SDA/SCL on a
-    // running bus panics arduino-pico. Just re-assert pin function.
+    // SUSPECT (2026-07-19): per agents/hardware/pinouts.md the codec is on
+    // I2C1 / GPIO26-27, which is `Wire` -- yet this talks over `Wire1`, whose
+    // pins are GPIO2/3 (the MAIN UART flow-control lines, not an I2C bus). The
+    // pin re-assert below is for 26/27, i.e. the OTHER bus, so these writes very
+    // likely go nowhere. Switching to `Wire` was tried and reverted: it did not
+    // resolve the setup() hang under investigation and added a second variable.
+    // Left as-is deliberately; revisit with the codec on a scope.
+    // Wire was brought up earlier (BQ27441 path); calling setSDA/setSCL on a
+    // running bus panics arduino-pico, so only re-assert the pin function.
     gpio_set_function(26, GPIO_FUNC_I2C);
     gpio_set_function(27, GPIO_FUNC_I2C);
 

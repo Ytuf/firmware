@@ -88,6 +88,7 @@ static void ow__evq_push(ow_device* dev, const char* line) {
  * shifted down for the next call. */
 static ow_status ow__read_line(ow_device* dev, char* out, size_t outcap,
                                uint32_t timeout_ms) {
+    size_t pulled = 0;
     for (;;) {
         int routed = 0;
         for (size_t i = 0; i < dev->line_len; ++i) {
@@ -103,13 +104,23 @@ static ow_status ow__read_line(ow_device* dev, char* out, size_t outcap,
             }
         }
         if (routed) continue;   /* rescan the shifted buffer for more lines */
-        if (dev->line_len + 1 >= sizeof dev->line) return OW_ERR_BUFFER;
+        if (dev->line_len + 1 >= sizeof dev->line) {
+            dev->line_len = 0;      /* overlong line, no newline: drop and resync */
+            return OW_ERR_TIMEOUT;
+        }
         {
             int n = dev->t.read(dev->t.ctx, (uint8_t*)dev->line + dev->line_len,
                                 sizeof dev->line - dev->line_len - 1, timeout_ms);
             if (n == 0) return OW_ERR_TIMEOUT;
             if (n < 0) return OW_ERR_IO;
             dev->line_len += (size_t)n;
+            /* Non-blocking poll (timeout 0) must not spin here forever when the
+             * link streams continuously: cap the bytes pulled per call and hand
+             * back (routed events are already queued; the rest waits for the
+             * next poll). Blocking calls keep their own timeout. */
+            pulled += (size_t)n;
+            if (timeout_ms == 0 && pulled >= 2048)
+                return OW_ERR_TIMEOUT;
         }
     }
 }
@@ -216,6 +227,17 @@ void ow_close(ow_device* dev) {
     if (!dev || !dev->t.write) return;
     const uint8_t reset[1] = {0x02};
     (void)dev->t.write(dev->t.ctx, reset, 1);
+}
+
+ow_status ow_send_cmd_noreply(ow_device* dev, const char* cmd) {
+    if (!dev || !cmd || !dev->t.write) return OW_ERR_ARG;
+    uint8_t out[OW_CMD_MAX + 2];
+    size_t clen = strlen(cmd);
+    if (clen + 2 > sizeof out) return OW_ERR_ARG;
+    out[0] = 0x02;                          /* reset to root + quiet */
+    memcpy(out + 1, cmd, clen);
+    out[1 + clen] = '\n';
+    return dev->t.write(dev->t.ctx, out, clen + 2) < 0 ? OW_ERR_IO : OW_OK;
 }
 
 int ow_poll_text_line(ow_device* dev, char* id, size_t id_cap,

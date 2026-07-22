@@ -66,6 +66,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "modules/WaypointModule.h"
 #include "sleep.h"
 #include "target_specific.h"
+#if defined(FREEWILI)
+#include "platform/extra_variants/freewili/freewili_gps.h"   // freewiliGpsHasFix()
+#include "platform/extra_variants/freewili/freewili_map.h"   // g_fwmap_active, g_fwmap_frame_index, g_fwmap_force_repaint
+#include "platform/extra_variants/freewili/freewili_panel.h" // g_freewili_color_takeover
+#endif
 extern MessageStore messageStore;
 
 #if USE_TFTDISPLAY
@@ -800,7 +805,41 @@ int32_t Screen::runOnce()
             if (lastFrameIndex == textMsgIndex && currentFrameIndex != textMsgIndex) {
                 graphics::MessageRenderer::clearMessageCache();
             }
+#if defined(FREEWILI)
+            // Leaving the color map frame: drop the panel takeover and stop the tile
+            // service, then force a FULL mono repaint. The map drew color straight to
+            // the panel, so the mono double-buffer never changed and the normal
+            // diff-flush would leave the color pixels on screen. The fromBlank=true
+            // path fills the whole panel black first (erasing every map pixel) then
+            // repaints the mono buffer -- resetDisplay() is NOT enough here, its
+            // memset(buffer_back,1) only flags 1 of every 8 rows (page-packed) as
+            // changed, leaving color remnants on the other 7.
+            if (lastFrameIndex == framesetInfo.positions.freewiliMap &&
+                currentFrameIndex != framesetInfo.positions.freewiliMap) {
+                g_freewili_color_takeover = false;
+                g_fwmap_active = 0;
+                // display(true) forces a full mono repaint that erases every map pixel. It is
+                // safe not because "core1 is idle" but because it runs on the single flush core
+                // (same path as ui->update()'s per-frame flush) -> no cross-core spi1 access.
+                static_cast<TFTDisplay *>(dispdev)->display(true);
+            }
+#endif
         }
+
+#if defined(FREEWILI)
+        // Fix-loss repaint: drawFreewiliMap sets g_fwmap_force_repaint on the active->inactive
+        // edge when a REAL fix is lost while the map frame is current (no frame change, so the
+        // leave-hook above never fires). Consume it with a full mono repaint that erases the
+        // directly-drawn color band the diff-flush can't. Runs on the single flush core, before
+        // ui->update()'s flush -> non-reentrant on spi1 (same invariant the leave-hook relies on).
+        if (g_fwmap_force_repaint) {
+            g_fwmap_force_repaint = false;
+            static_cast<TFTDisplay *>(dispdev)->display(true);
+        }
+#endif
+
+        // NOTE (map leave transition): the currentFrame-change leave-hook above clears the color
+        // takeover and does the final display(true) at transition end, on the single flush core.
 
         lastFrameIndex = currentFrameIndex;
     }
@@ -1102,6 +1141,13 @@ void Screen::setFrames(FrameFocus focus)
     }
     // FreeWili all-nodes radar map (self at center, peers at bearing/distance).
     normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliNodeMap;
+    indicatorIcons.push_back(icon_compass);
+    // FreeWili color OSM map (Task 6b): SD-backed color tiles drawn straight to the
+    // panel when this frame is current + there's a GPS fix. Record the index so the
+    // frame callback can gate its panel takeover on being the current frame.
+    fsi.positions.freewiliMap = numframes;
+    g_fwmap_frame_index = fsi.positions.freewiliMap;
+    normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliMap;
     indicatorIcons.push_back(icon_compass);
     // FreeWili WiFi wardrive survey (APs heard by the ESP32-C5 via MAIN).
     normalFrames[numframes++] = graphics::NodeListRenderer::drawFreewiliWifiSurvey;
@@ -1772,6 +1818,28 @@ int Screen::handleInputEvent(const InputEvent *event)
             return 0;
         }
     }
+#if defined(FREEWILI)
+    // On the color map frame, UP zooms in (14->16->18) and DOWN zooms out
+    // (18->16->14), each re-rendering at the new level. Consumed here (before the
+    // generic UP/DOWN and LEFT/RIGHT handling) so they don't fall through to
+    // carousel nav. LEFT/RIGHT stay carousel nav, which moves off the frame and
+    // triggers the takeover-clear in runOnce() -- that IS the "exit map" gesture.
+    // TODO(map): this UP/DOWN->zoom intercept does not fire on hardware -- pressing UP on the
+    // map navigates the carousel away instead of zooming (g_fwmap_zoom unchanged, verified over
+    // SWD). Buttons DO emit INPUT_BROKER_UP/DOWN (PICButtonInput) and this block precedes the nav
+    // block, so an earlier consumer or a currentFrame mismatch is eating it. Add a hit counter here
+    // to confirm reach, then fix. (Zoom mechanism itself works; only the button binding is broken.)
+    if (ui->getUiState()->currentFrame == framesetInfo.positions.freewiliMap) {
+        if (event->inputEvent == INPUT_BROKER_UP) {
+            freewili_map_zoom_in();
+            return 0;
+        }
+        if (event->inputEvent == INPUT_BROKER_DOWN) {
+            freewili_map_zoom_out();
+            return 0;
+        }
+    }
+#endif
     // Use left or right input from a keyboard to move between frames,
     // so long as a mesh module isn't using these events for some other purpose
     if (showingNormalScreen) {

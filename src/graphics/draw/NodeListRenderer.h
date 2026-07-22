@@ -57,6 +57,10 @@ void drawNodeListWithCompasses(OLEDDisplay *display, OLEDDisplayUiState *state, 
 // FreeWili all-nodes radar map (center = me, blips at bearing/distance).
 void drawFreewiliNodes(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 void drawFreewiliNodeMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
+// FreeWili color OSM map frame (Task 6b): SD-backed color tiles drawn straight to
+// the panel when this frame is current and there's a GPS fix; mono "Waiting for
+// GPS fix" otherwise. Screen::runOnce() clears the takeover on leaving the frame.
+void drawFreewiliMap(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 // FreeWili WiFi wardrive survey (APs heard via the ESP32-C5, forwarded by MAIN).
 void drawFreewiliWifiSurvey(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 #endif

@@ -14,6 +14,11 @@ PICButtonInput *picButtonInput = nullptr;
 volatile uint32_t g_freewili_pic_btn_frames = 0;
 volatile uint16_t g_freewili_pic_last_buttons = 0;
 volatile uint32_t g_freewili_pic_rx_bytes = 0;
+// Diagnostic: event byte + payload length of the most recent framed PIC message,
+// so a build that still decodes 0 button frames can be told what the PIC actually
+// sends (expect event=0xB2, len=20). __attribute__((used)) keeps them past --gc-sections.
+volatile uint8_t __attribute__((used)) g_freewili_pic_last_event = 0;
+volatile uint16_t __attribute__((used)) g_freewili_pic_last_len = 0;
 
 PICButtonInput::PICButtonInput() : concurrency::OSThread("PICButton")
 {
@@ -65,27 +70,34 @@ int32_t PICButtonInput::runOnce()
         case WAIT_EVENT:
             calcChecksum += byte;
             event = byte;
-            if (byte == PIC_EVENT_BUTTONS && length == 2) {
+            g_freewili_pic_last_event = byte;
+            g_freewili_pic_last_len = length;
+            payloadCount = 0;
+            if (byte == PIC_EVENT_STATUS && length >= 2 && length <= 512) {
+                // Unified status frame: first two payload bytes are the button
+                // bitmask; remaining status bytes are consumed to stay aligned.
                 picState = WAIT_BTN_LOW;
             } else if (length <= 512) {
-                // Any other framed event (e.g. battery 0xB1): consume the
-                // payload so we stay aligned, then verify the checksum.
-                payloadCount = 0;
+                // Any other framed event: consume the payload to stay aligned,
+                // then discard at the checksum stage (event != STATUS).
                 picState = length ? WAIT_PAYLOAD : WAIT_CK_LSB;
             } else {
                 picState = WAIT_SYNC1; // implausible length — resync
             }
             break;
         case WAIT_BTN_LOW:
-            // First button byte on the wire is buttons.all bits 0..7.
+            // First payload byte = buttons.all bits 0..7.
             btnLow = byte;
             calcChecksum += byte;
+            payloadCount = 1;
             picState = WAIT_BTN_HIGH;
             break;
         case WAIT_BTN_HIGH:
-            btnHigh = byte; // second byte = buttons.all bits 8..15
+            btnHigh = byte; // second payload byte = buttons.all bits 8..15
             calcChecksum += byte;
-            picState = WAIT_CK_LSB;
+            payloadCount = 2;
+            // Consume any remaining status bytes (battery/gpio) before checksum.
+            picState = (length > 2) ? WAIT_PAYLOAD : WAIT_CK_LSB;
             break;
         case WAIT_PAYLOAD:
             calcChecksum += byte;
@@ -98,7 +110,7 @@ int32_t PICButtonInput::runOnce()
             break;
         case WAIT_CK_MSB:
             rxChecksum |= ((uint16_t)byte << 8);
-            if (rxChecksum == calcChecksum && event == PIC_EVENT_BUTTONS) {
+            if (rxChecksum == calcChecksum && event == PIC_EVENT_STATUS) {
                 uint16_t buttons = ((uint16_t)btnHigh << 8) | btnLow;
                 g_freewili_pic_btn_frames++;
                 g_freewili_pic_last_buttons = buttons;
